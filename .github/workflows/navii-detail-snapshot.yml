@@ -1,0 +1,463 @@
+name: "Source Snapshot: Navii Detail"
+
+# This workflow is intentionally manual-only and must not connect to
+# downstream private systems or any production secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Fetch Navii detail pages"
+        type: boolean
+        default: false
+      confirm:
+        description: "execute時は owner-approved-public-source-snapshot を入力"
+        type: string
+        required: false
+        default: ""
+      source_id:
+        description: "Source id"
+        type: choice
+        options:
+          - navii_detail
+        default: navii_detail
+      source_snapshot_date:
+        description: "Official source snapshot date"
+        type: string
+        required: true
+        default: "2025-12-01"
+      run_label:
+        description: "Artifact label. Use collector-navii-detail-YYYYMMDD-canary/full"
+        type: string
+        required: true
+        default: "collector-navii-detail-20251201-canary"
+      artifact_mode:
+        description: "summary_only or encrypted_full"
+        type: choice
+        options:
+          - summary_only
+          - encrypted_full
+        default: summary_only
+      kinds:
+        description: "hospital,clinic,dental,pharmacy"
+        type: string
+        required: true
+        default: "hospital,clinic,dental,pharmacy"
+      shard_count:
+        description: "Total shard count"
+        type: string
+        required: true
+        default: "1"
+      shard_indexes:
+        description: "Shard indexes to run. Empty means all shards. Example: 0,1,2"
+        type: string
+        required: false
+        default: ""
+      max_parallel:
+        description: "Concurrent shard jobs"
+        type: string
+        required: true
+        default: "1"
+      workers:
+        description: "Fetch workers per shard"
+        type: string
+        required: true
+        default: "2"
+      pause_seconds:
+        description: "Minimum request submission interval"
+        type: string
+        required: true
+        default: "0.3"
+      jitter_seconds:
+        description: "Random jitter added to request submission interval"
+        type: string
+        required: true
+        default: "0.1"
+      timeout_seconds:
+        description: "HTTP timeout seconds"
+        type: string
+        required: true
+        default: "30"
+      retry_count:
+        description: "HTTP retry count"
+        type: string
+        required: true
+        default: "2"
+      retry_backoff_seconds:
+        description: "Retry backoff seconds"
+        type: string
+        required: true
+        default: "2"
+      insecure_skip_tls_verify:
+        description: "Owner-approved troubleshooting only: disable TLS verification"
+        type: boolean
+        default: false
+      max_pages_per_shard:
+        description: "Shard page limit. Use 0 for full run"
+        type: string
+        required: true
+        default: "400"
+      fail_on_fetch_error_rate:
+        description: "Fail when fetch error rate exceeds this percent"
+        type: string
+        required: true
+        default: "5"
+      artifact_retention_days:
+        description: "GitHub artifact retention days"
+        type: string
+        required: true
+        default: "7"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: navii-detail-snapshot-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: "Validate inputs"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Validate owner gate and shard matrix
+        id: plan
+        env:
+          EXECUTE: ${{ inputs.execute }}
+          CONFIRM: ${{ inputs.confirm }}
+          ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          SHARD_INDEXES: ${{ inputs.shard_indexes }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          execute = os.environ["EXECUTE"].lower() == "true"
+          confirm = os.environ.get("CONFIRM", "")
+          artifact_mode = os.environ["ARTIFACT_MODE"]
+          if execute and confirm != "owner-approved-public-source-snapshot":
+              raise SystemExit("execute=true requires confirm=owner-approved-public-source-snapshot")
+          if artifact_mode not in {"summary_only", "encrypted_full"}:
+              raise SystemExit(f"invalid artifact_mode: {artifact_mode}")
+
+          shard_count = int(os.environ["SHARD_COUNT"])
+          if shard_count < 1:
+              raise SystemExit("shard_count must be >= 1")
+          raw_indexes = os.environ.get("SHARD_INDEXES", "").strip()
+          if raw_indexes:
+              indexes = [int(part) for part in re.split(r"[\s,]+", raw_indexes) if part]
+          else:
+              indexes = list(range(shard_count))
+          invalid = [index for index in indexes if index < 0 or index >= shard_count]
+          if invalid:
+              raise SystemExit(f"invalid shard index for shard_count={shard_count}: {invalid}")
+
+          matrix = {"include": [{"shard_index": index} for index in indexes]}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
+          print(json.dumps(matrix, indent=2))
+          PY
+
+  prepare-source:
+    name: "Prepare official source files"
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download official source ZIPs
+        env:
+          SOURCE_MANIFEST: sources/navii/source-manifest.json
+          SOURCE_DIR: ${{ runner.temp }}/source-open-data
+        run: |
+          set -euo pipefail
+          mkdir -p "$SOURCE_DIR"
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          manifest = json.loads(Path(os.environ["SOURCE_MANIFEST"]).read_text(encoding="utf-8"))
+          out_dir = Path(os.environ["SOURCE_DIR"])
+          for source in manifest["source_urls"]:
+              target = out_dir / source["expected_filename"]
+              print(f"downloading {source['kind']} -> {target.name}")
+              subprocess.run([
+                  "curl",
+                  "-L",
+                  "--fail",
+                  "--retry",
+                  "3",
+                  "--retry-delay",
+                  "3",
+                  "-o",
+                  str(target),
+                  source["url"],
+              ], check=True)
+          PY
+          shasum -a 256 "$SOURCE_DIR"/* > "$SOURCE_DIR/SHA256SUMS.source"
+          ls -lh "$SOURCE_DIR"
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-open-data-${{ github.run_id }}
+          path: ${{ runner.temp }}/source-open-data/
+          retention-days: ${{ fromJSON(inputs.artifact_retention_days) }}
+
+  collect:
+    name: "Collect shard ${{ matrix.shard_index }}"
+    needs:
+      - validate
+      - prepare-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
+    env:
+      SOURCE_DIR: /tmp/source-open-data
+      OUT_DIR: /tmp/navii-detail-output
+      SHARD_INDEX: ${{ matrix.shard_index }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-open-data-${{ github.run_id }}
+          path: ${{ env.SOURCE_DIR }}
+
+      - name: Run collector
+        env:
+          EXECUTE: ${{ inputs.execute }}
+          RUN_LABEL: ${{ inputs.run_label }}
+          SOURCE_ID: ${{ inputs.source_id }}
+          SOURCE_SNAPSHOT_DATE: ${{ inputs.source_snapshot_date }}
+          ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+          KINDS: ${{ inputs.kinds }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          MAX_PAGES_PER_SHARD: ${{ inputs.max_pages_per_shard }}
+          WORKERS: ${{ inputs.workers }}
+          PAUSE_SECONDS: ${{ inputs.pause_seconds }}
+          JITTER_SECONDS: ${{ inputs.jitter_seconds }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          RETRY_COUNT: ${{ inputs.retry_count }}
+          RETRY_BACKOFF_SECONDS: ${{ inputs.retry_backoff_seconds }}
+          INSECURE_SKIP_TLS_VERIFY: ${{ inputs.insecure_skip_tls_verify }}
+          FAIL_ON_FETCH_ERROR_RATE: ${{ inputs.fail_on_fetch_error_rate }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          args=(
+            --source-dir "$SOURCE_DIR"
+            --out-dir "$OUT_DIR"
+            --source-id "$SOURCE_ID"
+            --source-snapshot-date "$SOURCE_SNAPSHOT_DATE"
+            --run-label "$RUN_LABEL"
+            --artifact-mode "$ARTIFACT_MODE"
+            --kinds "$KINDS"
+            --shard-count "$SHARD_COUNT"
+            --shard-index "$SHARD_INDEX"
+            --max-pages-per-shard "$MAX_PAGES_PER_SHARD"
+            --workers "$WORKERS"
+            --pause-seconds "$PAUSE_SECONDS"
+            --jitter-seconds "$JITTER_SECONDS"
+            --timeout-seconds "$TIMEOUT_SECONDS"
+            --retry-count "$RETRY_COUNT"
+            --retry-backoff-seconds "$RETRY_BACKOFF_SECONDS"
+            --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
+          )
+          if [ "$EXECUTE" = "true" ]; then
+            args+=(--execute)
+          fi
+          if [ "$INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
+            args+=(--insecure-skip-tls-verify)
+          fi
+          python3 collectors/navii_detail/collect.py "${args[@]}"
+
+      - name: Package shard output
+        env:
+          ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+          SHARD_PACKAGE_DIR: /tmp/navii-detail-shard-package
+          SHARD_INDEX: ${{ matrix.shard_index }}
+        run: |
+          set -euo pipefail
+          rm -rf "$SHARD_PACKAGE_DIR"
+          mkdir -p "$SHARD_PACKAGE_DIR/metrics" "$SHARD_PACKAGE_DIR/encrypted" "$SHARD_PACKAGE_DIR/checksums"
+
+          # Public shard packages must not expose raw facility-level full output.
+          # The collector should emit safe summary files for summary_only mode.
+          if [ -f "$OUT_DIR/run-metrics.json" ]; then
+            cp "$OUT_DIR/run-metrics.json" "$SHARD_PACKAGE_DIR/metrics/run-metrics.json"
+          fi
+          if [ -f "$OUT_DIR/coverage-summary.csv.gz" ]; then
+            cp "$OUT_DIR/coverage-summary.csv.gz" "$SHARD_PACKAGE_DIR/metrics/coverage-summary.csv.gz"
+          fi
+
+          if [ "$ARTIFACT_MODE" = "encrypted_full" ]; then
+            test -s keys/owner-age-recipient.txt
+            sudo apt-get update
+            sudo apt-get install -y age zstd
+            tar --zstd -cf "$SHARD_PACKAGE_DIR/encrypted/raw-artifacts-shard-${SHARD_INDEX}.tar.zst" \
+              -C "$OUT_DIR" .
+            age -R keys/owner-age-recipient.txt \
+              -o "$SHARD_PACKAGE_DIR/encrypted/raw-artifacts-shard-${SHARD_INDEX}.tar.zst.age" \
+              "$SHARD_PACKAGE_DIR/encrypted/raw-artifacts-shard-${SHARD_INDEX}.tar.zst"
+            rm "$SHARD_PACKAGE_DIR/encrypted/raw-artifacts-shard-${SHARD_INDEX}.tar.zst"
+          else
+            echo "summary_only mode: raw shard output was not uploaded" > "$SHARD_PACKAGE_DIR/encrypted/README.txt"
+          fi
+
+          (cd "$SHARD_PACKAGE_DIR" && find . -type f -not -path './checksums/SHA256SUMS' -print0 | sort -z | xargs -0 shasum -a 256 > checksums/SHA256SUMS)
+          find "$SHARD_PACKAGE_DIR" -maxdepth 3 -type f -print | sort
+
+      - name: Upload shard summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: navii-detail-shard-${{ matrix.shard_index }}-${{ github.run_id }}
+          path: /tmp/navii-detail-shard-package/
+          retention-days: ${{ fromJSON(inputs.artifact_retention_days) }}
+
+  package:
+    name: "Package handoff artifact"
+    needs:
+      - collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: navii-detail-shard-*-${{ github.run_id }}
+          path: ${{ runner.temp }}/shards
+          merge-multiple: false
+
+      - name: Build manifest and package
+        env:
+          RUN_LABEL: ${{ inputs.run_label }}
+          SOURCE_ID: ${{ inputs.source_id }}
+          SOURCE_SNAPSHOT_DATE: ${{ inputs.source_snapshot_date }}
+          ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          WORKERS: ${{ inputs.workers }}
+          PACKAGE_DIR: ${{ runner.temp }}/package
+        run: |
+          set -euo pipefail
+          mkdir -p "$PACKAGE_DIR/manifest" "$PACKAGE_DIR/metrics" "$PACKAGE_DIR/checksums" "$PACKAGE_DIR/encrypted"
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          package_dir = Path(os.environ["PACKAGE_DIR"])
+          manifest = {
+              "schema_version": "1.0",
+              "collector_repo": os.environ.get("GITHUB_REPOSITORY", ""),
+              "source_id": os.environ["SOURCE_ID"],
+              "source_snapshot_date": os.environ["SOURCE_SNAPSHOT_DATE"],
+              "run_label": os.environ["RUN_LABEL"],
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "github_run_url": f"{os.environ.get('GITHUB_SERVER_URL')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
+              "completed_at": datetime.now(timezone.utc).isoformat(),
+              "artifact_mode": os.environ["ARTIFACT_MODE"],
+              "shards": {
+                  "shard_count": int(os.environ["SHARD_COUNT"]),
+                  "max_parallel": int(os.environ["MAX_PARALLEL"]),
+                  "workers_per_shard": int(os.environ["WORKERS"]),
+              },
+          }
+          (package_dir / "manifest" / "collector-run-manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          cp sources/navii/source-manifest.json "$PACKAGE_DIR/manifest/source-snapshot-manifest.json"
+          cp -R "${{ runner.temp }}/shards" "$PACKAGE_DIR/shard-packages"
+          while IFS= read -r -d '' file; do
+            shard_name="$(basename "$(dirname "$(dirname "$file")")")"
+            cp "$file" "$PACKAGE_DIR/metrics/${shard_name}-$(basename "$file")"
+          done < <(find "$PACKAGE_DIR/shard-packages" -path '*/metrics/*' -type f -print0 | sort -z)
+          while IFS= read -r -d '' file; do
+            cp "$file" "$PACKAGE_DIR/encrypted/$(basename "$file")"
+          done < <(find "$PACKAGE_DIR/shard-packages" -path '*/encrypted/*' -type f -print0 | sort -z)
+          rm -rf "$PACKAGE_DIR/shard-packages"
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          package_dir = Path(os.environ["PACKAGE_DIR"])
+          metrics_dir = package_dir / "metrics"
+          rows = []
+          for path in sorted(metrics_dir.glob("*run-metrics.json")):
+              try:
+                  rows.append(json.loads(path.read_text(encoding="utf-8")))
+              except json.JSONDecodeError:
+                  continue
+
+          candidate_count = sum(int(row.get("candidate_count") or 0) for row in rows)
+          fetch_ok_count = sum(int(row.get("fetch_ok_count") or 0) for row in rows)
+          fetch_error_count = sum(int(row.get("fetch_error_count") or 0) for row in rows)
+          denominator = fetch_ok_count + fetch_error_count
+          fetch_metrics = {
+              "schema_version": "1.0",
+              "source_id": os.environ["SOURCE_ID"],
+              "source_snapshot_date": os.environ["SOURCE_SNAPSHOT_DATE"],
+              "candidate_count": candidate_count,
+              "fetch_ok_count": fetch_ok_count,
+              "fetch_error_count": fetch_error_count,
+              "fetch_error_rate": (fetch_error_count / denominator) if denominator else 0,
+          }
+          shard_summary = {
+              "schema_version": "1.0",
+              "source_id": os.environ["SOURCE_ID"],
+              "source_snapshot_date": os.environ["SOURCE_SNAPSHOT_DATE"],
+              "shard_count": int(os.environ["SHARD_COUNT"]),
+              "shards": rows,
+          }
+          (metrics_dir / "fetch-metrics.json").write_text(
+              json.dumps(fetch_metrics, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          (metrics_dir / "shard-summary.json").write_text(
+              json.dumps(shard_summary, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          if [ "$ARTIFACT_MODE" = "summary_only" ]; then
+            echo "summary_only mode: encrypted full artifact was not generated" > "$PACKAGE_DIR/encrypted/README.txt"
+          fi
+
+          (cd "$PACKAGE_DIR" && find . -type f -not -path './checksums/SHA256SUMS' -print0 | sort -z | xargs -0 shasum -a 256 > checksums/SHA256SUMS)
+          find "$PACKAGE_DIR" -maxdepth 3 -type f -print | sort
+
+      - name: Upload handoff package
+        uses: actions/upload-artifact@v4
+        with:
+          name: navii-detail-handoff-${{ inputs.run_label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/package/
+          retention-days: ${{ fromJSON(inputs.artifact_retention_days) }}

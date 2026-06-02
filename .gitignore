@@ -1,0 +1,15 @@
+# Decrypted or generated full artifacts must not be committed.
+artifacts/
+raw-artifacts/
+__pycache__/
+*.py[cod]
+*.tar
+*.tar.zst
+*.age
+*.tmp
+
+# Local owner-only keys must not be committed.
+keys/*.txt
+!keys/owner-age-recipient.txt
+!keys/owner-age-recipient.example.txt
+!keys/README.md

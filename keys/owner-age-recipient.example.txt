@@ -1,0 +1,3 @@
+# Replace this file with owner age public recipient before encrypted_full runs.
+# Example format:
+# age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
