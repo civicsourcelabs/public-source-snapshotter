@@ -1,9 +1,9 @@
 name: "Source Snapshot: Navii Detail"
 
-# This workflow is intentionally manual-only and must not connect to
-# downstream private systems or any production secret.
-
 on:
+  schedule:
+    # Monthly full run at 00:30 JST on the 4th, before private prepare-load.
+    - cron: "30 15 3 * *"
   workflow_dispatch:
     inputs:
       execute:
@@ -111,6 +111,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 concurrency:
   group: navii-detail-snapshot-${{ github.ref }}
   cancel-in-progress: false
@@ -122,34 +125,131 @@ jobs:
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      execute: ${{ steps.plan.outputs.execute }}
+      confirm: ${{ steps.plan.outputs.confirm }}
+      source_id: ${{ steps.plan.outputs.source_id }}
+      source_snapshot_date: ${{ steps.plan.outputs.source_snapshot_date }}
+      run_label: ${{ steps.plan.outputs.run_label }}
+      artifact_mode: ${{ steps.plan.outputs.artifact_mode }}
+      kinds: ${{ steps.plan.outputs.kinds }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      max_parallel: ${{ steps.plan.outputs.max_parallel }}
+      workers: ${{ steps.plan.outputs.workers }}
+      pause_seconds: ${{ steps.plan.outputs.pause_seconds }}
+      jitter_seconds: ${{ steps.plan.outputs.jitter_seconds }}
+      timeout_seconds: ${{ steps.plan.outputs.timeout_seconds }}
+      retry_count: ${{ steps.plan.outputs.retry_count }}
+      retry_backoff_seconds: ${{ steps.plan.outputs.retry_backoff_seconds }}
+      insecure_skip_tls_verify: ${{ steps.plan.outputs.insecure_skip_tls_verify }}
+      max_pages_per_shard: ${{ steps.plan.outputs.max_pages_per_shard }}
+      fail_on_fetch_error_rate: ${{ steps.plan.outputs.fail_on_fetch_error_rate }}
+      artifact_retention_days: ${{ steps.plan.outputs.artifact_retention_days }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Validate owner gate and shard matrix
         id: plan
         env:
+          EVENT_NAME: ${{ github.event_name }}
           EXECUTE: ${{ inputs.execute }}
           CONFIRM: ${{ inputs.confirm }}
+          SOURCE_ID: ${{ inputs.source_id }}
+          SOURCE_SNAPSHOT_DATE: ${{ inputs.source_snapshot_date }}
+          RUN_LABEL: ${{ inputs.run_label }}
           ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+          KINDS: ${{ inputs.kinds }}
           SHARD_COUNT: ${{ inputs.shard_count }}
           SHARD_INDEXES: ${{ inputs.shard_indexes }}
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          WORKERS: ${{ inputs.workers }}
+          PAUSE_SECONDS: ${{ inputs.pause_seconds }}
+          JITTER_SECONDS: ${{ inputs.jitter_seconds }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          RETRY_COUNT: ${{ inputs.retry_count }}
+          RETRY_BACKOFF_SECONDS: ${{ inputs.retry_backoff_seconds }}
+          INSECURE_SKIP_TLS_VERIFY: ${{ inputs.insecure_skip_tls_verify }}
+          MAX_PAGES_PER_SHARD: ${{ inputs.max_pages_per_shard }}
+          FAIL_ON_FETCH_ERROR_RATE: ${{ inputs.fail_on_fetch_error_rate }}
+          ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json
           import os
           import re
+          from pathlib import Path
 
-          execute = os.environ["EXECUTE"].lower() == "true"
-          confirm = os.environ.get("CONFIRM", "")
-          artifact_mode = os.environ["ARTIFACT_MODE"]
+          def emit(name: str, value: str) -> None:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                  handle.write(f"{name}={value}\n")
+
+          def value(name: str, default: str) -> str:
+              raw = os.environ.get(name, "")
+              return raw if raw not in {"", "None"} else default
+
+          manifest_path = Path("sources/navii/source-manifest.json")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          manifest_snapshot = manifest["source_snapshot_date"]
+
+          if os.environ["EVENT_NAME"] == "schedule":
+              resolved = {
+                  "execute": "true",
+                  "confirm": "owner-approved-public-source-snapshot",
+                  "source_id": "navii_detail",
+                  "source_snapshot_date": manifest_snapshot,
+                  "run_label": f"collector-navii-detail-{manifest_snapshot.replace('-', '')}-full",
+                  "artifact_mode": "encrypted_full",
+                  "kinds": "hospital,clinic,dental,pharmacy",
+                  "shard_count": "32",
+                  "max_parallel": "32",
+                  "workers": "2",
+                  "pause_seconds": "0.3",
+                  "jitter_seconds": "0.1",
+                  "timeout_seconds": "30",
+                  "retry_count": "2",
+                  "retry_backoff_seconds": "2",
+                  "insecure_skip_tls_verify": "false",
+                  "max_pages_per_shard": "0",
+                  "fail_on_fetch_error_rate": "5",
+                  "artifact_retention_days": "14",
+              }
+              raw_indexes = ""
+          else:
+              resolved = {
+                  "execute": value("EXECUTE", "false").lower(),
+                  "confirm": value("CONFIRM", ""),
+                  "source_id": value("SOURCE_ID", "navii_detail"),
+                  "source_snapshot_date": value("SOURCE_SNAPSHOT_DATE", manifest_snapshot),
+                  "run_label": value("RUN_LABEL", f"collector-navii-detail-{manifest_snapshot.replace('-', '')}-canary"),
+                  "artifact_mode": value("ARTIFACT_MODE", "summary_only"),
+                  "kinds": value("KINDS", "hospital,clinic,dental,pharmacy"),
+                  "shard_count": value("SHARD_COUNT", "1"),
+                  "max_parallel": value("MAX_PARALLEL", "1"),
+                  "workers": value("WORKERS", "2"),
+                  "pause_seconds": value("PAUSE_SECONDS", "0.3"),
+                  "jitter_seconds": value("JITTER_SECONDS", "0.1"),
+                  "timeout_seconds": value("TIMEOUT_SECONDS", "30"),
+                  "retry_count": value("RETRY_COUNT", "2"),
+                  "retry_backoff_seconds": value("RETRY_BACKOFF_SECONDS", "2"),
+                  "insecure_skip_tls_verify": value("INSECURE_SKIP_TLS_VERIFY", "false").lower(),
+                  "max_pages_per_shard": value("MAX_PAGES_PER_SHARD", "400"),
+                  "fail_on_fetch_error_rate": value("FAIL_ON_FETCH_ERROR_RATE", "5"),
+                  "artifact_retention_days": value("ARTIFACT_RETENTION_DAYS", "7"),
+              }
+              raw_indexes = os.environ.get("SHARD_INDEXES", "").strip()
+
+          execute = resolved["execute"] == "true"
+          confirm = resolved["confirm"]
+          artifact_mode = resolved["artifact_mode"]
           if execute and confirm != "owner-approved-public-source-snapshot":
               raise SystemExit("execute=true requires confirm=owner-approved-public-source-snapshot")
           if artifact_mode not in {"summary_only", "encrypted_full"}:
               raise SystemExit(f"invalid artifact_mode: {artifact_mode}")
 
-          shard_count = int(os.environ["SHARD_COUNT"])
+          shard_count = int(resolved["shard_count"])
           if shard_count < 1:
               raise SystemExit("shard_count must be >= 1")
-          raw_indexes = os.environ.get("SHARD_INDEXES", "").strip()
           if raw_indexes:
               indexes = [int(part) for part in re.split(r"[\s,]+", raw_indexes) if part]
           else:
@@ -159,9 +259,10 @@ jobs:
               raise SystemExit(f"invalid shard index for shard_count={shard_count}: {invalid}")
 
           matrix = {"include": [{"shard_index": index} for index in indexes]}
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
-          print(json.dumps(matrix, indent=2))
+          emit("matrix", json.dumps(matrix, separators=(",", ":")))
+          for key, resolved_value in resolved.items():
+              emit(key, str(resolved_value))
+          print(json.dumps({"resolved": resolved, "matrix": matrix}, ensure_ascii=False, indent=2))
           PY
 
   prepare-source:
@@ -171,7 +272,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download official source ZIPs
         env:
@@ -208,11 +309,11 @@ jobs:
           ls -lh "$SOURCE_DIR"
 
       - name: Upload source artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: source-open-data-${{ github.run_id }}
           path: ${{ runner.temp }}/source-open-data/
-          retention-days: ${{ fromJSON(inputs.artifact_retention_days) }}
+          retention-days: ${{ fromJSON(needs.validate.outputs.artifact_retention_days) }}
 
   collect:
     name: "Collect shard ${{ matrix.shard_index }}"
@@ -223,7 +324,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      max-parallel: ${{ fromJSON(needs.validate.outputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
     env:
       SOURCE_DIR: /tmp/source-open-data
@@ -231,37 +332,37 @@ jobs:
       SHARD_INDEX: ${{ matrix.shard_index }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Download source artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: source-open-data-${{ github.run_id }}
           path: ${{ env.SOURCE_DIR }}
 
       - name: Run collector
         env:
-          EXECUTE: ${{ inputs.execute }}
-          RUN_LABEL: ${{ inputs.run_label }}
-          SOURCE_ID: ${{ inputs.source_id }}
-          SOURCE_SNAPSHOT_DATE: ${{ inputs.source_snapshot_date }}
-          ARTIFACT_MODE: ${{ inputs.artifact_mode }}
-          KINDS: ${{ inputs.kinds }}
-          SHARD_COUNT: ${{ inputs.shard_count }}
-          MAX_PAGES_PER_SHARD: ${{ inputs.max_pages_per_shard }}
-          WORKERS: ${{ inputs.workers }}
-          PAUSE_SECONDS: ${{ inputs.pause_seconds }}
-          JITTER_SECONDS: ${{ inputs.jitter_seconds }}
-          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
-          RETRY_COUNT: ${{ inputs.retry_count }}
-          RETRY_BACKOFF_SECONDS: ${{ inputs.retry_backoff_seconds }}
-          INSECURE_SKIP_TLS_VERIFY: ${{ inputs.insecure_skip_tls_verify }}
-          FAIL_ON_FETCH_ERROR_RATE: ${{ inputs.fail_on_fetch_error_rate }}
+          EXECUTE: ${{ needs.validate.outputs.execute }}
+          RUN_LABEL: ${{ needs.validate.outputs.run_label }}
+          SOURCE_ID: ${{ needs.validate.outputs.source_id }}
+          SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
+          ARTIFACT_MODE: ${{ needs.validate.outputs.artifact_mode }}
+          KINDS: ${{ needs.validate.outputs.kinds }}
+          SHARD_COUNT: ${{ needs.validate.outputs.shard_count }}
+          MAX_PAGES_PER_SHARD: ${{ needs.validate.outputs.max_pages_per_shard }}
+          WORKERS: ${{ needs.validate.outputs.workers }}
+          PAUSE_SECONDS: ${{ needs.validate.outputs.pause_seconds }}
+          JITTER_SECONDS: ${{ needs.validate.outputs.jitter_seconds }}
+          TIMEOUT_SECONDS: ${{ needs.validate.outputs.timeout_seconds }}
+          RETRY_COUNT: ${{ needs.validate.outputs.retry_count }}
+          RETRY_BACKOFF_SECONDS: ${{ needs.validate.outputs.retry_backoff_seconds }}
+          INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
+          FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
         run: |
           set -euo pipefail
           mkdir -p "$OUT_DIR"
@@ -294,7 +395,7 @@ jobs:
 
       - name: Package shard output
         env:
-          ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+          ARTIFACT_MODE: ${{ needs.validate.outputs.artifact_mode }}
           SHARD_PACKAGE_DIR: /tmp/navii-detail-shard-package
           SHARD_INDEX: ${{ matrix.shard_index }}
         run: |
@@ -329,24 +430,25 @@ jobs:
           find "$SHARD_PACKAGE_DIR" -maxdepth 3 -type f -print | sort
 
       - name: Upload shard summary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: navii-detail-shard-${{ matrix.shard_index }}-${{ github.run_id }}
           path: /tmp/navii-detail-shard-package/
-          retention-days: ${{ fromJSON(inputs.artifact_retention_days) }}
+          retention-days: ${{ fromJSON(needs.validate.outputs.artifact_retention_days) }}
 
   package:
     name: "Package handoff artifact"
     needs:
+      - validate
       - collect
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download shard artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: navii-detail-shard-*-${{ github.run_id }}
           path: ${{ runner.temp }}/shards
@@ -354,13 +456,13 @@ jobs:
 
       - name: Build manifest and package
         env:
-          RUN_LABEL: ${{ inputs.run_label }}
-          SOURCE_ID: ${{ inputs.source_id }}
-          SOURCE_SNAPSHOT_DATE: ${{ inputs.source_snapshot_date }}
-          ARTIFACT_MODE: ${{ inputs.artifact_mode }}
-          SHARD_COUNT: ${{ inputs.shard_count }}
-          MAX_PARALLEL: ${{ inputs.max_parallel }}
-          WORKERS: ${{ inputs.workers }}
+          RUN_LABEL: ${{ needs.validate.outputs.run_label }}
+          SOURCE_ID: ${{ needs.validate.outputs.source_id }}
+          SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
+          ARTIFACT_MODE: ${{ needs.validate.outputs.artifact_mode }}
+          SHARD_COUNT: ${{ needs.validate.outputs.shard_count }}
+          MAX_PARALLEL: ${{ needs.validate.outputs.max_parallel }}
+          WORKERS: ${{ needs.validate.outputs.workers }}
           PACKAGE_DIR: ${{ runner.temp }}/package
         run: |
           set -euo pipefail
@@ -456,8 +558,8 @@ jobs:
           find "$PACKAGE_DIR" -maxdepth 3 -type f -print | sort
 
       - name: Upload handoff package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: navii-detail-handoff-${{ inputs.run_label }}-${{ github.run_id }}
+          name: navii-detail-handoff-${{ needs.validate.outputs.run_label }}-${{ github.run_id }}
           path: ${{ runner.temp }}/package/
-          retention-days: ${{ fromJSON(inputs.artifact_retention_days) }}
+          retention-days: ${{ fromJSON(needs.validate.outputs.artifact_retention_days) }}
