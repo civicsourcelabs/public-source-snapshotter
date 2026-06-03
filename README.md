@@ -73,7 +73,7 @@ public-source-snapshotter/
 
 - collectorはmanual canaryから始め、owner確認済みのものだけschedule化する
 - MHLW monthly collectorは、private月次pipeline前にencrypted full artifactを作るscheduleを持つ
-- Navii detail collectorは、全件取得負荷と利用判断が残るためmanual実行のまま扱う
+- Navii detail collectorは、private prepare-load scheduleより前にencrypted full artifactを作るscheduleを持つ
 - summary / metricsは平文でよいが、施設単位のfull artifactは暗号化する
 - private keyはowner localだけに置く
 - public repoのActionsからproduction DBへ接続しない
