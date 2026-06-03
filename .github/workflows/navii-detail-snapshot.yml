@@ -110,6 +110,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: navii-detail-snapshot-${{ github.ref }}
@@ -118,6 +119,7 @@ concurrency:
 jobs:
   validate:
     name: "Validate inputs"
+    if: ${{ !contains(inputs.run_label, 'stitch-recovered') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -166,6 +168,7 @@ jobs:
 
   prepare-source:
     name: "Prepare official source files"
+    if: ${{ !contains(inputs.run_label, 'stitch-recovered') }}
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -216,6 +219,7 @@ jobs:
 
   collect:
     name: "Collect shard ${{ matrix.shard_index }}"
+    if: ${{ !contains(inputs.run_label, 'stitch-recovered') }}
     needs:
       - validate
       - prepare-source
@@ -337,6 +341,7 @@ jobs:
 
   package:
     name: "Package handoff artifact"
+    if: ${{ !contains(inputs.run_label, 'stitch-recovered') }}
     needs:
       - collect
     runs-on: ubuntu-latest
@@ -456,6 +461,211 @@ jobs:
           find "$PACKAGE_DIR" -maxdepth 3 -type f -print | sort
 
       - name: Upload handoff package
+        uses: actions/upload-artifact@v4
+        with:
+          name: navii-detail-handoff-${{ inputs.run_label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/package/
+          retention-days: ${{ fromJSON(inputs.artifact_retention_days) }}
+
+  stitch-recovered:
+    name: "Stitch recovered handoff"
+    if: ${{ contains(inputs.run_label, 'stitch-recovered') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download original successful shards
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: civicsourcelabs/public-source-snapshotter
+          run-id: 26830379869
+          pattern: navii-detail-shard-*-26830379869
+          path: ${{ runner.temp }}/recovered-shards/original
+          merge-multiple: false
+
+      - name: Download shard 28 retry split shards
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: civicsourcelabs/public-source-snapshotter
+          run-id: 26866781345
+          pattern: navii-detail-shard-*-26866781345
+          path: ${{ runner.temp }}/recovered-shards/shard28-retry1
+          merge-multiple: false
+
+      - name: Download shard 92 retry split shards
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: civicsourcelabs/public-source-snapshotter
+          run-id: 26867411733
+          pattern: navii-detail-shard-*-26867411733
+          path: ${{ runner.temp }}/recovered-shards/shard92-retry2
+          merge-multiple: false
+
+      - name: Download shard 92 final retry shards
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: civicsourcelabs/public-source-snapshotter
+          run-id: 26867681044
+          pattern: navii-detail-shard-*-26867681044
+          path: ${{ runner.temp }}/recovered-shards/shard92-retry3
+          merge-multiple: false
+
+      - name: Build recovered handoff package
+        env:
+          RUN_LABEL: ${{ inputs.run_label }}
+          SOURCE_ID: ${{ inputs.source_id }}
+          SOURCE_SNAPSHOT_DATE: ${{ inputs.source_snapshot_date }}
+          ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+          PACKAGE_DIR: ${{ runner.temp }}/package
+          SHARDS_DIR: ${{ runner.temp }}/recovered-shards
+        run: |
+          set -euo pipefail
+          mkdir -p "$PACKAGE_DIR/manifest" "$PACKAGE_DIR/metrics" "$PACKAGE_DIR/checksums" "$PACKAGE_DIR/encrypted"
+
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          package_dir = Path(os.environ["PACKAGE_DIR"])
+          manifest = {
+              "schema_version": "1.0",
+              "collector_repo": os.environ.get("GITHUB_REPOSITORY", ""),
+              "source_id": os.environ["SOURCE_ID"],
+              "source_snapshot_date": os.environ["SOURCE_SNAPSHOT_DATE"],
+              "run_label": os.environ["RUN_LABEL"],
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "github_run_url": f"{os.environ.get('GITHUB_SERVER_URL')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
+              "completed_at": datetime.now(timezone.utc).isoformat(),
+              "artifact_mode": os.environ["ARTIFACT_MODE"],
+              "recovery": {
+                  "logical_shard_count": 32,
+                  "expected_candidate_count": 197967,
+                  "source_runs": {
+                      "original": "26830379869",
+                      "shard28_retry1": "26866781345",
+                      "shard92_retry2": "26867411733",
+                      "shard92_retry3": "26867681044",
+                  },
+                  "artifact_counts": {
+                      "original": 31,
+                      "shard28_retry1": 9,
+                      "shard92_retry2": 7,
+                      "shard92_retry3": 3,
+                  },
+              },
+          }
+          (package_dir / "manifest" / "collector-run-manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          cp sources/navii/source-manifest.json "$PACKAGE_DIR/manifest/source-snapshot-manifest.json"
+          cp -R "$SHARDS_DIR" "$PACKAGE_DIR/shard-packages"
+
+          while IFS= read -r -d '' file; do
+            shard_name="$(basename "$(dirname "$(dirname "$file")")")"
+            cp "$file" "$PACKAGE_DIR/metrics/${shard_name}-$(basename "$file")"
+          done < <(find "$PACKAGE_DIR/shard-packages" -path '*/metrics/*' -type f -print0 | sort -z)
+
+          while IFS= read -r -d '' file; do
+            cp "$file" "$PACKAGE_DIR/encrypted/$(basename "$file")"
+          done < <(find "$PACKAGE_DIR/shard-packages" -path '*/encrypted/*.age' -type f -print0 | sort -z)
+
+          rm -rf "$PACKAGE_DIR/shard-packages"
+
+          python3 - <<'PY'
+          import json
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          package_dir = Path(os.environ["PACKAGE_DIR"])
+          metrics_dir = package_dir / "metrics"
+          rows = []
+          for path in sorted(metrics_dir.glob("*run-metrics.json")):
+              rows.append(json.loads(path.read_text(encoding="utf-8")))
+
+          source_counts = Counter()
+          for row in rows:
+              shard_count = int(row.get("shard_count") or 0)
+              shard_index = int(row.get("shard_index") or -1)
+              if shard_count == 32:
+                  source_counts["original"] += 1
+                  if shard_index == 28:
+                      raise SystemExit("original failed shard 28 must not be included")
+              elif shard_count == 320:
+                  source_counts["shard28_retry1"] += 1
+              elif shard_count == 3200:
+                  source_counts["shard92_retry2_or_retry3"] += 1
+              else:
+                  raise SystemExit(f"unexpected shard_count in recovered package: {shard_count}")
+
+          candidate_count = sum(int(row.get("candidate_count") or 0) for row in rows)
+          fetch_ok_count = sum(int(row.get("fetch_ok_count") or 0) for row in rows)
+          fetch_error_count = sum(int(row.get("fetch_error_count") or 0) for row in rows)
+          encrypted_count = len(list((package_dir / "encrypted").glob("*.age")))
+
+          if len(rows) != 50:
+              raise SystemExit(f"expected 50 shard metrics, found {len(rows)}")
+          if encrypted_count != 50:
+              raise SystemExit(f"expected 50 encrypted shard artifacts, found {encrypted_count}")
+          if candidate_count != 197967:
+              raise SystemExit(f"expected candidate_count=197967, found {candidate_count}")
+          if fetch_ok_count != 197967:
+              raise SystemExit(f"expected fetch_ok_count=197967, found {fetch_ok_count}")
+          if fetch_error_count != 0:
+              raise SystemExit(f"expected fetch_error_count=0, found {fetch_error_count}")
+          if source_counts["original"] != 31:
+              raise SystemExit(f"expected 31 original shard metrics, found {source_counts['original']}")
+          if source_counts["shard28_retry1"] != 9:
+              raise SystemExit(f"expected 9 shard28 retry1 metrics, found {source_counts['shard28_retry1']}")
+          if source_counts["shard92_retry2_or_retry3"] != 10:
+              raise SystemExit(f"expected 10 shard92 retry metrics, found {source_counts['shard92_retry2_or_retry3']}")
+
+          denominator = fetch_ok_count + fetch_error_count
+          fetch_metrics = {
+              "schema_version": "1.0",
+              "source_id": os.environ["SOURCE_ID"],
+              "source_snapshot_date": os.environ["SOURCE_SNAPSHOT_DATE"],
+              "candidate_count": candidate_count,
+              "fetch_ok_count": fetch_ok_count,
+              "fetch_error_count": fetch_error_count,
+              "fetch_error_rate": (fetch_error_count / denominator) if denominator else 0,
+              "encrypted_shard_artifact_count": encrypted_count,
+              "recovered_shard_metric_count": len(rows),
+              "source_counts": dict(source_counts),
+          }
+          shard_summary = {
+              "schema_version": "1.0",
+              "source_id": os.environ["SOURCE_ID"],
+              "source_snapshot_date": os.environ["SOURCE_SNAPSHOT_DATE"],
+              "logical_shard_count": 32,
+              "recovered_shard_metric_count": len(rows),
+              "shards": rows,
+          }
+          (metrics_dir / "fetch-metrics.json").write_text(
+              json.dumps(fetch_metrics, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          (metrics_dir / "shard-summary.json").write_text(
+              json.dumps(shard_summary, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          (cd "$PACKAGE_DIR" && find . -type f -not -path './checksums/SHA256SUMS' -print0 | sort -z | xargs -0 shasum -a 256 > checksums/SHA256SUMS)
+          find "$PACKAGE_DIR" -maxdepth 3 -type f -print | sort
+
+      - name: Upload recovered handoff package
         uses: actions/upload-artifact@v4
         with:
           name: navii-detail-handoff-${{ inputs.run_label }}-${{ github.run_id }}
