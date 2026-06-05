@@ -36,6 +36,11 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
   "github_run_url": "https://github.com/owner/repository/actions/runs/123456789",
   "completed_at": "2026-06-01T00:00:00Z",
   "artifact_mode": "summary_only",
+  "candidate_selection": {
+    "mode": "all",
+    "sample_per_kind": 25,
+    "sample_strategy": "prefecture-stratified"
+  },
   "shards": {
     "shard_count": 1,
     "max_parallel": 1,
@@ -93,11 +98,16 @@ raw-artifacts/
     candidates.csv.gz
     page-coverage.csv.gz
     table-rows.csv.gz
+    links.csv.gz
     phone-numbers.csv.gz
     summary.csv.gz
     coverage-summary.csv.gz
     run-metrics.json
 ```
+
+`table-rows.csv.gz` はdetail page内の抽出可能なtable rowを全section分出力します。これらのrowは `target_group=all_detail` を使います。
+
+`links.csv.gz` はdetail page内tableに含まれるlinkのvisible text、raw href、resolved hrefをsource-neutralに記録します。
 
 shard job間の中間artifactもpublic repo上では見える前提になるため、`encrypted_full` ではshardごとに暗号化したartifactだけをuploadします。未暗号化のraw shard directoryはpackage artifactへ含めません。
 

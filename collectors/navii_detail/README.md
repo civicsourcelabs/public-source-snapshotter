@@ -54,6 +54,7 @@ candidates.csv.gz
 summary.csv.gz
 page-coverage.csv.gz
 table-rows.csv.gz
+links.csv.gz
 phone-numbers.csv.gz
 coverage-summary.csv.gz
 run-metrics.json
@@ -77,6 +78,13 @@ run-metrics.json
 `phone-numbers.csv.gz` contains neutral phone contact rows extracted from target
 detail-page tables. Fax rows are excluded when the row label identifies them as
 fax/facsimile rows.
+
+`table-rows.csv.gz` contains all extractable detail-page table rows. These rows
+use `target_group=all_detail`; target-group coverage remains available in
+`summary.csv.gz`, `page-coverage.csv.gz`, and `coverage-summary.csv.gz`.
+
+`links.csv.gz` contains source links found inside detail-page tables, including
+the source section, row label, visible text, raw href, and resolved href.
 
 ## Public Safety
 

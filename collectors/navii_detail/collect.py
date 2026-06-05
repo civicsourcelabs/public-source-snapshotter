@@ -116,6 +116,8 @@ TARGET_GROUPS = {
     ),
 }
 
+ALL_DETAIL_GROUP = "all_detail"
+
 PHONE_EXCLUDED_LABEL_TERMS = ("FAX", "ＦＡＸ", "ファクシミリ")
 PHONE_CONTACT_KIND_TERMS = {
     "after_hours": ("夜間", "休日", "時間外"),
@@ -617,6 +619,28 @@ TABLE_FIELDNAMES = [
     "raw_row_joined",
 ]
 
+LINK_FIELDNAMES = [
+    "source_kind",
+    "product_slug",
+    "navii_id",
+    "pref_cd",
+    "kikan_kbn",
+    "kikan_cd",
+    "name",
+    "address",
+    "detail_url",
+    "target_group",
+    "section_title",
+    "table_index",
+    "row_number",
+    "cell_index",
+    "row_label",
+    "link_text",
+    "link_href_raw",
+    "link_href_resolved",
+    "raw_row_joined",
+]
+
 PHONE_FIELDNAMES = [
     "source_kind",
     "product_slug",
@@ -777,6 +801,68 @@ def extract_tables(section_title: str, body_html: str) -> list[SectionTable]:
     return tables
 
 
+def extract_href(anchor_attrs: str) -> str:
+    match = re.search(
+        r"""\bhref\s*=\s*(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)'|(?P<bare>[^\s>]+))""",
+        anchor_attrs,
+        flags=re.I,
+    )
+    if not match:
+        return ""
+    return html.unescape(match.group("double") or match.group("single") or match.group("bare") or "")
+
+
+def extract_links(
+    *,
+    section_title: str,
+    body_html: str,
+    page_url: str,
+) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    for table_index, table_match in enumerate(
+        re.finditer(r"<table\b[^>]*>(.*?)</table>", body_html, flags=re.S | re.I),
+        start=1,
+    ):
+        table_html = table_match.group(1)
+        for row_number, tr_match in enumerate(
+            re.finditer(r"<tr\b[^>]*>(.*?)</tr>", table_html, flags=re.S | re.I),
+            start=1,
+        ):
+            tr_html = tr_match.group(1)
+            cell_matches = list(
+                re.finditer(r"<(th|td)\b[^>]*>(.*?)</\1>", tr_html, flags=re.S | re.I)
+            )
+            cells = [normalize_text(cell_match.group(2)) for cell_match in cell_matches]
+            row_label = next((cell for cell in cells if cell), "")
+            raw_row_joined = " | ".join(cell for cell in cells if cell)
+            for cell_index, cell_match in enumerate(cell_matches, start=1):
+                cell_html = cell_match.group(2)
+                for anchor_match in re.finditer(
+                    r"<a\b(?P<attrs>[^>]*)>(?P<body>.*?)</a>",
+                    cell_html,
+                    flags=re.S | re.I,
+                ):
+                    href_raw = extract_href(anchor_match.group("attrs"))
+                    if not href_raw:
+                        continue
+                    link_text = normalize_text(anchor_match.group("body"))
+                    links.append(
+                        {
+                            "target_group": ALL_DETAIL_GROUP,
+                            "section_title": section_title,
+                            "table_index": str(table_index),
+                            "row_number": str(row_number),
+                            "cell_index": str(cell_index),
+                            "row_label": row_label,
+                            "link_text": link_text,
+                            "link_href_raw": href_raw,
+                            "link_href_resolved": urllib.parse.urljoin(page_url, href_raw),
+                            "raw_row_joined": raw_row_joined,
+                        }
+                    )
+    return links
+
+
 def normalized_phone_source(value: str) -> str:
     return re.sub(r"\s+", " ", value.translate(PHONE_CHAR_TRANSLATION)).strip()
 
@@ -864,18 +950,51 @@ def extract_phone_rows(
 
 def analyze_detail(
     page_html: str,
-) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    *,
+    page_url: str = "",
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     summary_rows: list[dict[str, str]] = []
     table_rows: list[dict[str, str]] = []
     phone_rows: list[dict[str, str]] = []
+    link_rows: list[dict[str, str]] = []
 
     for section_title, body_html in iter_section_html(page_html):
         section_text = f"{section_title} {html_to_text(body_html)}"
+        tables = extract_tables(section_title, body_html)
+        link_rows.extend(
+            extract_links(section_title=section_title, body_html=body_html, page_url=page_url)
+        )
+        summary_rows.append(
+            {
+                "target_group": ALL_DETAIL_GROUP,
+                "section_title": section_title,
+                "section_text_sample": section_text[:300],
+                "table_count": str(len(tables)),
+                "has_extractable_table": "true" if tables else "false",
+            }
+        )
+
+        for table in tables:
+            for row_number, row in enumerate(table.rows, start=1):
+                row_label = row[0] if row else ""
+                values = row[1:] if len(row) > 1 else []
+                table_rows.append(
+                    {
+                        "target_group": ALL_DETAIL_GROUP,
+                        "section_title": table.section_title,
+                        "table_index": str(table.table_index),
+                        "row_number": str(row_number),
+                        "row_label": row_label,
+                        "values_joined": " | ".join(values),
+                        "cell_count": str(len(row)),
+                        "raw_row_joined": " | ".join(row),
+                    }
+                )
+
         groups = classify_text(section_text)
         if not groups:
             continue
 
-        tables = extract_tables(section_title, body_html)
         if "phone_contact" in groups:
             phone_rows.extend(extract_phone_rows(section_title=section_title, tables=tables))
 
@@ -890,24 +1009,7 @@ def analyze_detail(
                 }
             )
 
-        for table in tables:
-            for row_number, row in enumerate(table.rows, start=1):
-                row_label = row[0] if row else ""
-                values = row[1:] if len(row) > 1 else []
-                for group in groups:
-                    table_rows.append(
-                        {
-                            "target_group": group,
-                            "section_title": table.section_title,
-                            "table_index": str(table.table_index),
-                            "row_number": str(row_number),
-                            "row_label": row_label,
-                            "values_joined": " | ".join(values),
-                            "cell_count": str(len(row)),
-                            "raw_row_joined": " | ".join(row),
-                        }
-                    )
-    return summary_rows, table_rows, phone_rows
+    return summary_rows, table_rows, phone_rows, link_rows
 
 
 def write_summary(path: Path, rows: list[dict[str, str]]) -> None:
@@ -920,6 +1022,13 @@ def write_summary(path: Path, rows: list[dict[str, str]]) -> None:
 def write_tables(path: Path, rows: list[dict[str, str]]) -> None:
     with open_csv_text(path, "wt") as handle:
         writer = csv.DictWriter(handle, fieldnames=TABLE_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_links(path: Path, rows: list[dict[str, str]]) -> None:
+    with open_csv_text(path, "wt") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LINK_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1086,11 +1195,20 @@ def run_self_test() -> None:
         </table></div>
       </div><!-- /.details -->
     </div>
+    <div class="item">
+      <h3 class="heading acHeading"><a><div>案内用ホームページアドレス</div></a></h3>
+      <div class="details idx-6" style="display:block;">
+        <div class="ptn1DataArea"><table>
+          <tr><th>案内用ホームページアドレス</th><td><a href="/clinic/">https://example.test/clinic</a></td></tr>
+        </table></div>
+      </div><!-- /.details -->
+    </div>
     """
-    summary, tables, phone_rows = analyze_detail(sample)
+    summary, tables, phone_rows, link_rows = analyze_detail(sample, page_url="https://example.test/base/")
     groups = {row["target_group"] for row in summary}
     labels = {row["row_label"] for row in tables}
     normalized_phone_numbers = {row["phone_number_normalized"] for row in phone_rows}
+    table_groups = {row["target_group"] for row in tables}
     coverage_rows = build_page_coverage_rows(
         NaviiCandidate(
             source_kind="clinic",
@@ -1112,6 +1230,8 @@ def run_self_test() -> None:
     assert "personnel" in groups, groups
     assert "appointment_outpatient_hours" in groups, groups
     assert "phone_contact" in groups, groups
+    assert ALL_DETAIL_GROUP in groups, groups
+    assert table_groups == {ALL_DETAIL_GROUP}, table_groups
     assert "医師" in labels, labels
     assert "電話による診療予約の可否" in labels, labels
     assert "0112223333" in normalized_phone_numbers, normalized_phone_numbers
@@ -1120,7 +1240,15 @@ def run_self_test() -> None:
     assert "0112225555" not in normalized_phone_numbers, normalized_phone_numbers
     assert "0112227777" not in normalized_phone_numbers, normalized_phone_numbers
     assert any(
+        row["link_href_resolved"] == "https://example.test/clinic/"
+        for row in link_rows
+    ), link_rows
+    assert any(
         row["target_group"] == "personnel" and row["group_present_pct"] == "100.00"
+        for row in coverage_summary
+    ), coverage_summary
+    assert any(
+        row["target_group"] == "personnel" and int(row["table_row_count"]) > 0
         for row in coverage_summary
     ), coverage_summary
     print("navii_detail collector self-test passed")
@@ -1141,11 +1269,19 @@ def build_page_coverage_rows(
     )
     table_counts: Counter[str] = Counter()
     table_row_counts = Counter(row["target_group"] for row in section_tables)
+    table_rows_by_section = Counter(
+        row["section_title"]
+        for row in section_tables
+        if row["target_group"] == ALL_DETAIL_GROUP
+    )
     for row in section_summaries:
-        table_counts[row["target_group"]] += int(row["table_count"] or 0)
+        target_group = row["target_group"]
+        table_counts[target_group] += int(row["table_count"] or 0)
+        if target_group != ALL_DETAIL_GROUP:
+            table_row_counts[target_group] += table_rows_by_section[row["section_title"]]
 
     rows: list[dict[str, str]] = []
-    for target_group in TARGET_GROUPS:
+    for target_group in (ALL_DETAIL_GROUP, *TARGET_GROUPS):
         section_count = section_counts[target_group]
         table_count = table_counts[target_group]
         table_row_count = table_row_counts[target_group]
@@ -1182,10 +1318,14 @@ def process_candidate(
             retry_count=args.retry_count,
             retry_backoff_seconds=args.retry_backoff_seconds,
         )
-        section_summaries, section_tables, phone_numbers = analyze_detail(page_html)
+        section_summaries, section_tables, phone_numbers, links = analyze_detail(
+            page_html,
+            page_url=candidate.detail_url,
+        )
         summary_rows: list[dict[str, str]] = []
         table_rows: list[dict[str, str]] = []
         phone_rows: list[dict[str, str]] = []
+        link_rows: list[dict[str, str]] = []
         if not section_summaries:
             summary_rows.append(
                 {
@@ -1205,6 +1345,8 @@ def process_candidate(
             table_rows.append({**candidate.__dict__, **row})
         for row in phone_numbers:
             phone_rows.append({**candidate.__dict__, **row})
+        for row in links:
+            link_rows.append({**candidate.__dict__, **row})
         page_coverage_rows = build_page_coverage_rows(
             candidate, "ok", "", section_summaries, section_tables
         )
@@ -1215,6 +1357,7 @@ def process_candidate(
             "summary_rows": summary_rows,
             "table_rows": table_rows,
             "phone_rows": phone_rows,
+            "link_rows": link_rows,
             "page_coverage_rows": page_coverage_rows,
         }
     except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
@@ -1239,6 +1382,7 @@ def process_candidate(
             "summary_rows": summary_rows,
             "table_rows": [],
             "phone_rows": [],
+            "link_rows": [],
             "page_coverage_rows": page_coverage_rows,
         }
 
@@ -1326,6 +1470,7 @@ def main() -> int:
     candidates_path = output_path(args.out_dir / "candidates.csv", gzip_output=args.gzip_output)
     summary_path = output_path(args.out_dir / "summary.csv", gzip_output=args.gzip_output)
     tables_path = output_path(args.out_dir / "table-rows.csv", gzip_output=args.gzip_output)
+    links_path = output_path(args.out_dir / "links.csv", gzip_output=args.gzip_output)
     phone_numbers_path = output_path(
         args.out_dir / "phone-numbers.csv",
         gzip_output=args.gzip_output,
@@ -1341,6 +1486,7 @@ def main() -> int:
     if not args.execute:
         write_summary(summary_path, [])
         write_tables(tables_path, [])
+        write_links(links_path, [])
         write_phone_numbers(phone_numbers_path, [])
         write_page_coverage(page_coverage_path, [])
         write_coverage_summary(coverage_summary_path, [])
@@ -1363,11 +1509,13 @@ def main() -> int:
             "fetch_error_rate": 0,
             "fetch_error_rate_percent": 0,
             "phone_number_rows": 0,
+            "link_rows": 0,
             "started_at": started_at,
             "completed_at": completed_at,
             "candidates": str(candidates_path),
             "summary": str(summary_path),
             "tables": str(tables_path),
+            "links": str(links_path),
             "phone_numbers": str(phone_numbers_path),
             "page_coverage": str(page_coverage_path),
             "coverage_summary": str(coverage_summary_path),
@@ -1386,6 +1534,7 @@ def main() -> int:
                 "shard_index": args.shard_index,
                 "shard_count": args.shard_count,
                 "candidates": str(candidates_path),
+                "links": str(links_path),
                 "phone_numbers": str(phone_numbers_path),
                 "metrics": str(metrics_path),
                 "note": "No Navii detail HTML was fetched. Re-run with --execute after owner approval.",
@@ -1405,6 +1554,7 @@ def main() -> int:
     output_targets = {
         summary_path: SUMMARY_FIELDNAMES,
         tables_path: TABLE_FIELDNAMES,
+        links_path: LINK_FIELDNAMES,
         phone_numbers_path: PHONE_FIELDNAMES,
         page_coverage_path: PAGE_COVERAGE_FIELDNAMES,
     }
@@ -1432,6 +1582,10 @@ def main() -> int:
         next(path for path, fields in write_paths.items() if fields is PHONE_FIELDNAMES),
         PHONE_FIELDNAMES,
     )
+    links_handle, links_writer = csv_writer(
+        next(path for path, fields in write_paths.items() if fields is LINK_FIELDNAMES),
+        LINK_FIELDNAMES,
+    )
     page_handle, page_writer = csv_writer(
         next(path for path, fields in write_paths.items() if fields is PAGE_COVERAGE_FIELDNAMES),
         PAGE_COVERAGE_FIELDNAMES,
@@ -1447,6 +1601,11 @@ def main() -> int:
             counts["table_rows"] += copy_existing_rows(
                 source_path=tables_path,
                 writer=tables_writer,
+                completed_ids=completed_ids,
+            )
+            counts["link_rows"] += copy_existing_rows(
+                source_path=links_path,
+                writer=links_writer,
                 completed_ids=completed_ids,
             )
             counts["phone_number_rows"] += copy_existing_rows(
@@ -1481,20 +1640,24 @@ def main() -> int:
                 summary_rows = result["summary_rows"]
                 table_rows = result["table_rows"]
                 phone_rows = result["phone_rows"]
+                link_rows = result["link_rows"]
                 page_coverage_rows = result["page_coverage_rows"]
                 assert isinstance(summary_rows, list)
                 assert isinstance(table_rows, list)
                 assert isinstance(phone_rows, list)
+                assert isinstance(link_rows, list)
                 assert isinstance(page_coverage_rows, list)
 
                 summary_writer.writerows(summary_rows)
                 tables_writer.writerows(table_rows)
+                links_writer.writerows(link_rows)
                 phone_writer.writerows(phone_rows)
                 page_writer.writerows(page_coverage_rows)
                 update_coverage_counters(coverage_counters, page_coverage_rows)
 
                 counts["summary_rows"] += len(summary_rows)
                 counts["table_rows"] += len(table_rows)
+                counts["link_rows"] += len(link_rows)
                 counts["phone_number_rows"] += len(phone_rows)
                 counts["page_coverage_rows"] += len(page_coverage_rows)
                 counts[f"fetch_{result['fetch_status']}"] += 1
@@ -1516,6 +1679,7 @@ def main() -> int:
     finally:
         summary_handle.close()
         tables_handle.close()
+        links_handle.close()
         phone_handle.close()
         page_handle.close()
 
@@ -1559,11 +1723,13 @@ def main() -> int:
         "completed_at": completed_at,
         "summary_rows": counts["summary_rows"],
         "table_rows": counts["table_rows"],
+        "link_rows": counts["link_rows"],
         "phone_number_rows": counts["phone_number_rows"],
         "page_coverage_rows": counts["page_coverage_rows"],
         "candidates": str(candidates_path),
         "summary": str(summary_path),
         "tables": str(tables_path),
+        "links": str(links_path),
         "phone_numbers": str(phone_numbers_path),
         "page_coverage": str(page_coverage_path),
         "coverage_summary": str(coverage_summary_path),
