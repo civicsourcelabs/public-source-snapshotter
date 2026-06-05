@@ -43,6 +43,25 @@ on:
         type: string
         required: true
         default: "hospital,clinic,dental,pharmacy"
+      candidate_mode:
+        description: "all or sample"
+        type: choice
+        options:
+          - all
+          - sample
+        default: all
+      sample_per_kind:
+        description: "Candidate rows per kind when candidate_mode=sample"
+        type: string
+        required: true
+        default: "25"
+      sample_strategy:
+        description: "Candidate sampling strategy when candidate_mode=sample"
+        type: choice
+        options:
+          - first
+          - prefecture-stratified
+        default: prefecture-stratified
       shard_count:
         description: "Total shard count"
         type: string
@@ -132,6 +151,9 @@ jobs:
       run_label: ${{ steps.plan.outputs.run_label }}
       artifact_mode: ${{ steps.plan.outputs.artifact_mode }}
       kinds: ${{ steps.plan.outputs.kinds }}
+      candidate_mode: ${{ steps.plan.outputs.candidate_mode }}
+      sample_per_kind: ${{ steps.plan.outputs.sample_per_kind }}
+      sample_strategy: ${{ steps.plan.outputs.sample_strategy }}
       shard_count: ${{ steps.plan.outputs.shard_count }}
       max_parallel: ${{ steps.plan.outputs.max_parallel }}
       workers: ${{ steps.plan.outputs.workers }}
@@ -159,6 +181,9 @@ jobs:
           RUN_LABEL: ${{ inputs.run_label }}
           ARTIFACT_MODE: ${{ inputs.artifact_mode }}
           KINDS: ${{ inputs.kinds }}
+          CANDIDATE_MODE: ${{ inputs.candidate_mode }}
+          SAMPLE_PER_KIND: ${{ inputs.sample_per_kind }}
+          SAMPLE_STRATEGY: ${{ inputs.sample_strategy }}
           SHARD_COUNT: ${{ inputs.shard_count }}
           SHARD_INDEXES: ${{ inputs.shard_indexes }}
           MAX_PARALLEL: ${{ inputs.max_parallel }}
@@ -201,6 +226,9 @@ jobs:
                   "run_label": f"collector-navii-detail-{manifest_snapshot.replace('-', '')}-full",
                   "artifact_mode": "encrypted_full",
                   "kinds": "hospital,clinic,dental,pharmacy",
+                  "candidate_mode": "all",
+                  "sample_per_kind": "25",
+                  "sample_strategy": "prefecture-stratified",
                   "shard_count": "32",
                   "max_parallel": "32",
                   "workers": "2",
@@ -224,6 +252,9 @@ jobs:
                   "run_label": value("RUN_LABEL", f"collector-navii-detail-{manifest_snapshot.replace('-', '')}-canary"),
                   "artifact_mode": value("ARTIFACT_MODE", "summary_only"),
                   "kinds": value("KINDS", "hospital,clinic,dental,pharmacy"),
+                  "candidate_mode": value("CANDIDATE_MODE", "all"),
+                  "sample_per_kind": value("SAMPLE_PER_KIND", "25"),
+                  "sample_strategy": value("SAMPLE_STRATEGY", "prefecture-stratified"),
                   "shard_count": value("SHARD_COUNT", "1"),
                   "max_parallel": value("MAX_PARALLEL", "1"),
                   "workers": value("WORKERS", "2"),
@@ -246,6 +277,12 @@ jobs:
               raise SystemExit("execute=true requires confirm=owner-approved-public-source-snapshot")
           if artifact_mode not in {"summary_only", "encrypted_full"}:
               raise SystemExit(f"invalid artifact_mode: {artifact_mode}")
+          if resolved["candidate_mode"] not in {"all", "sample"}:
+              raise SystemExit(f"invalid candidate_mode: {resolved['candidate_mode']}")
+          if resolved["sample_strategy"] not in {"first", "prefecture-stratified"}:
+              raise SystemExit(f"invalid sample_strategy: {resolved['sample_strategy']}")
+          if int(resolved["sample_per_kind"]) < 0:
+              raise SystemExit("sample_per_kind must be >= 0")
 
           shard_count = int(resolved["shard_count"])
           if shard_count < 1:
@@ -353,6 +390,9 @@ jobs:
           SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
           ARTIFACT_MODE: ${{ needs.validate.outputs.artifact_mode }}
           KINDS: ${{ needs.validate.outputs.kinds }}
+          CANDIDATE_MODE: ${{ needs.validate.outputs.candidate_mode }}
+          SAMPLE_PER_KIND: ${{ needs.validate.outputs.sample_per_kind }}
+          SAMPLE_STRATEGY: ${{ needs.validate.outputs.sample_strategy }}
           SHARD_COUNT: ${{ needs.validate.outputs.shard_count }}
           MAX_PAGES_PER_SHARD: ${{ needs.validate.outputs.max_pages_per_shard }}
           WORKERS: ${{ needs.validate.outputs.workers }}
@@ -374,6 +414,8 @@ jobs:
             --run-label "$RUN_LABEL"
             --artifact-mode "$ARTIFACT_MODE"
             --kinds "$KINDS"
+            --sample-per-kind "$SAMPLE_PER_KIND"
+            --sample-strategy "$SAMPLE_STRATEGY"
             --shard-count "$SHARD_COUNT"
             --shard-index "$SHARD_INDEX"
             --max-pages-per-shard "$MAX_PAGES_PER_SHARD"
@@ -387,6 +429,9 @@ jobs:
           )
           if [ "$EXECUTE" = "true" ]; then
             args+=(--execute)
+          fi
+          if [ "$CANDIDATE_MODE" = "sample" ]; then
+            args+=(--sample-candidates)
           fi
           if [ "$INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
             args+=(--insecure-skip-tls-verify)
@@ -460,6 +505,9 @@ jobs:
           SOURCE_ID: ${{ needs.validate.outputs.source_id }}
           SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
           ARTIFACT_MODE: ${{ needs.validate.outputs.artifact_mode }}
+          CANDIDATE_MODE: ${{ needs.validate.outputs.candidate_mode }}
+          SAMPLE_PER_KIND: ${{ needs.validate.outputs.sample_per_kind }}
+          SAMPLE_STRATEGY: ${{ needs.validate.outputs.sample_strategy }}
           SHARD_COUNT: ${{ needs.validate.outputs.shard_count }}
           MAX_PARALLEL: ${{ needs.validate.outputs.max_parallel }}
           WORKERS: ${{ needs.validate.outputs.workers }}
@@ -484,6 +532,11 @@ jobs:
               "github_run_url": f"{os.environ.get('GITHUB_SERVER_URL')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
               "completed_at": datetime.now(timezone.utc).isoformat(),
               "artifact_mode": os.environ["ARTIFACT_MODE"],
+              "candidate_selection": {
+                  "mode": os.environ["CANDIDATE_MODE"],
+                  "sample_per_kind": int(os.environ["SAMPLE_PER_KIND"]),
+                  "sample_strategy": os.environ["SAMPLE_STRATEGY"],
+              },
               "shards": {
                   "shard_count": int(os.environ["SHARD_COUNT"]),
                   "max_parallel": int(os.environ["MAX_PARALLEL"]),
