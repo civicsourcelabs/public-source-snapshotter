@@ -203,7 +203,7 @@
       "expected_filename": "2605-01-03.zip"
     },
     {
-      "xpath": "//a[contains(@href, \"01-03.zip\")]",
+      "xpath": "//a[contains(@href, \"06_10-03.zip\") and contains(., \"歯科\")]",
       "region": "東海北陸",
       "page_url": "https://kouseikyoku.mhlw.go.jp/tokaihokuriku/newpage_00349.html",
       "priority": 10,
@@ -213,7 +213,7 @@
       "source_label": "届出受理_歯科",
       "pipeline_slug": "dental",
       "download_subdir": "東海北陸/届出受理",
-      "expected_filename": "2605-06_01-03.zip"
+      "expected_filename": "2607-06_10-03.zip"
     },
     {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[2]/div/table[1]/tbody/tr[2]/td[4]/ul/li[4]/a",
