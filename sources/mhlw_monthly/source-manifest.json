@@ -8,9 +8,9 @@
   "source_name": "mhlw-regional-monthly-source-files",
   "source_urls": [
     {
-      "xpath": "(//a[contains(@href, \".zip\") and contains(., \"歯科\")])[1]",
+      "xpath": "//table[@class=\"datatable\"][1]/tbody/tr[2]/td[6]/a",
       "region": "中国四国",
-      "page_url": "https://kouseikyoku.mhlw.go.jp/chugokushikoku/chousaka/shisetsukijunjuri.html",
+      "page_url": "https://kouseikyoku.mhlw.go.jp/chugokushikoku/chousaka/iryoukikanshitei.html",
       "priority": 20,
       "fetch_type": "xpath",
       "source_key": "dental-3ba4a796c970c066940d7090128244c6",
@@ -18,7 +18,7 @@
       "source_label": "コード内容別_歯科1",
       "pipeline_slug": "dental",
       "download_subdir": "中国四国/コード内容別_1",
-      "expected_filename": "000485634.zip"
+      "expected_filename": "000487376.zip"
     },
     {
       "xpath": "(//a[contains(@href, \".zip\")])[1]",
