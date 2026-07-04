@@ -148,6 +148,8 @@ def main() -> int:
 
     ok = sum(1 for result in results if result.status in {"downloaded", "dry_run_resolved"})
     errors = [result for result in results if result.status == "error"]
+    if errors:
+        print(json.dumps({"error_details": [error_summary(result) for result in errors[:10]]}, ensure_ascii=False))
     print(
         json.dumps(
             {
@@ -161,6 +163,19 @@ def main() -> int:
         )
     )
     return 1 if errors else 0
+
+
+def error_summary(result: SourceResult) -> dict[str, str]:
+    return {
+        "source_key": result.row.source_key,
+        "pipeline_slug": result.row.pipeline_slug,
+        "region": result.row.region,
+        "source_label": result.row.source_label,
+        "source_type": result.row.source_type,
+        "fetch_type": result.row.fetch_type,
+        "expected_filename": result.row.expected_filename,
+        "error": result.error,
+    }
 
 
 def load_manifest(path: Path) -> dict:
