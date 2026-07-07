@@ -229,9 +229,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install XPath dependency
+      - name: Install collector dependencies
         run: |
-          python3 -m pip install --disable-pip-version-check lxml
+          python3 -m pip install --disable-pip-version-check lxml openpyxl
 
       - name: Run collector
         env:

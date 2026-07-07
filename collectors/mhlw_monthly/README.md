@@ -8,17 +8,26 @@
 - `direct_download` / `xpath` / `month_context` source resolution
 - raw source file download
 - SHA256 checksum
+- source unit manifest generation
+- shallow XLSX content probe for source category / source kind checks
 - source-level metrics
 - handoff package生成
 
 このcollectorが行わないこと:
 
-- Excel parsing
-- private item normalization
-- private source reconciliation
-- private load script生成
+- record-level transformation
+- downstream item normalization
+- downstream source reconciliation
+- downstream load script生成
 - production DB write
-- private processing policy
+- downstream processing policy
+
+主な出力:
+
+- `manifest/mhlw-source-units.json`
+- `manifest/mhlw-source-coverage.json`
+- `metrics/mhlw-source-file-inventory.csv`
+- `metrics/source-coverage-summary.csv`
 
 ## Local canary
 

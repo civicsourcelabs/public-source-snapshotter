@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -23,10 +24,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 OWNER_CONFIRM = "owner-approved-public-source-snapshot"
@@ -38,6 +40,7 @@ ALLOWED_FETCH_TYPES = {"direct_download", "xpath", "month_context"}
 ALLOWED_SOURCE_TYPES = {"todokede", "code_content", "other", "unknown"}
 PRODUCT_LABEL_BY_SLUG = {"medical": "医科", "dental": "歯科", "pharmacy": "薬局"}
 PRODUCT_CODE_BY_SLUG = {"medical": "01", "dental": "03", "pharmacy": "04"}
+SOURCE_CATEGORY_BY_LABEL = {label: slug for slug, label in PRODUCT_LABEL_BY_SLUG.items()}
 SOURCE_TITLE_BY_TYPE = {
     "todokede": "届出受理医療機関名簿",
     "code_content": "コード内容別医療機関一覧表",
@@ -63,10 +66,17 @@ class SourceRow:
 
 
 @dataclass(frozen=True)
+class ResolvedSource:
+    url: str
+    selector: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class SourceResult:
     row: SourceRow
     status: str
     resolved_url: str = ""
+    selector: dict[str, Any] | None = None
     output_path: str = ""
     byte_size: int = 0
     sha256: str = ""
@@ -144,6 +154,20 @@ def main() -> int:
 
     write_inventory(out_dir / "metrics" / "mhlw-source-file-inventory.csv", results)
     write_coverage_summary(out_dir / "metrics" / "source-coverage-summary.csv", results)
+    source_units = build_source_units(
+        results,
+        out_dir=out_dir,
+        source_id=source_id,
+        source_snapshot_date=source_snapshot_date,
+    )
+    coverage = build_source_coverage(
+        source_units,
+        selected_count=len(rows),
+        is_full_snapshot=is_full_snapshot(args),
+        source_snapshot_date=source_snapshot_date,
+    )
+    write_json(out_dir / "manifest" / "mhlw-source-units.json", source_units)
+    write_json(out_dir / "manifest" / "mhlw-source-coverage.json", coverage)
     write_run_manifests(
         out_dir=out_dir,
         args=args,
@@ -165,12 +189,28 @@ def main() -> int:
                 "selected_count": len(rows),
                 "ok_count": ok,
                 "error_count": len(errors),
+                "source_unit_ok_count": coverage["ok_units"],
+                "source_unit_failed_count": coverage["failed_units"],
                 "out_dir": str(out_dir),
             },
             ensure_ascii=False,
         )
     )
-    return 1 if errors else 0
+    if errors:
+        return 1
+    if coverage["is_full_snapshot"] and coverage["failed_units"]:
+        print(
+            json.dumps(
+                {
+                    "source_coverage_status": "failed",
+                    "failed_units": coverage["failed_units"],
+                    "missing_units": coverage["missing_units"],
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
+    return 0
 
 
 def error_summary(result: SourceResult) -> dict[str, str]:
@@ -288,20 +328,26 @@ def prepare_output_dirs(out_dir: Path) -> None:
 
 def process_row(row: SourceRow, *, args: argparse.Namespace, out_dir: Path) -> SourceResult:
     try:
-        resolved_url = resolve_source_url(row, args=args)
+        resolved = resolve_source(row, args=args)
         if not args.execute:
-            return SourceResult(row=row, status="dry_run_resolved", resolved_url=resolved_url)
+            return SourceResult(
+                row=row,
+                status="dry_run_resolved",
+                resolved_url=resolved.url,
+                selector=resolved.selector,
+            )
 
-        dest = out_dir / "raw-files" / safe_relative_path(row.download_subdir) / destination_filename(row, resolved_url)
+        dest = out_dir / "raw-files" / safe_relative_path(row.download_subdir) / destination_filename(row, resolved.url)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(f"{dest.name}.tmp-{os.getpid()}")
-        download_file(resolved_url, tmp, args=args)
+        download_file(resolved.url, tmp, args=args)
         tmp.replace(dest)
         digest = sha256_file(dest)
         return SourceResult(
             row=row,
             status="downloaded",
-            resolved_url=resolved_url,
+            resolved_url=resolved.url,
+            selector=resolved.selector,
             output_path=str(dest.relative_to(out_dir)),
             byte_size=dest.stat().st_size,
             sha256=digest,
@@ -311,8 +357,19 @@ def process_row(row: SourceRow, *, args: argparse.Namespace, out_dir: Path) -> S
 
 
 def resolve_source_url(row: SourceRow, *, args: argparse.Namespace) -> str:
+    return resolve_source(row, args=args).url
+
+
+def resolve_source(row: SourceRow, *, args: argparse.Namespace) -> ResolvedSource:
     if row.fetch_type == "direct_download":
-        return row.file_url
+        return ResolvedSource(
+            url=row.file_url,
+            selector={
+                "type": "direct_download",
+                "selected_href": row.file_url,
+                "selected_filename": resolved_basename(row.file_url),
+            },
+        )
     html_text = request_text(row.page_url, args=args)
     if row.fetch_type == "month_context":
         return resolve_month_context_href(
@@ -321,7 +378,17 @@ def resolve_source_url(row: SourceRow, *, args: argparse.Namespace) -> str:
             row=row,
             source_snapshot_date=args.source_snapshot_date,
         )
-    return resolve_xpath_href(html_text, row.page_url, row.xpath)
+    href = resolve_xpath_href(html_text, row.page_url, row.xpath)
+    return ResolvedSource(
+        url=href,
+        selector={
+            "type": "xpath",
+            "page_url": row.page_url,
+            "xpath": row.xpath,
+            "selected_href": href,
+            "selected_filename": resolved_basename(href),
+        },
+    )
 
 
 def destination_filename(row: SourceRow, resolved_url: str) -> Path:
@@ -360,7 +427,7 @@ def resolve_month_context_href(
     page_url: str,
     row: SourceRow,
     source_snapshot_date: str,
-) -> str:
+) -> ResolvedSource:
     try:
         from lxml import html as lxml_html
     except ImportError as exc:
@@ -415,7 +482,30 @@ def resolve_month_context_href(
         basename=selected["basename"],
         target_month=target_month,
     )
-    return selected["href"]
+    selector_candidates = [
+        {
+            "date": candidate["snapshot_month"],
+            "format": candidate["format"],
+            "text": candidate["text"],
+            "href": candidate["href"],
+            "filename": candidate["basename"],
+        }
+        for candidate in candidates
+        if source_title in candidate["text"] and f"（{product_label}）" in candidate["text"]
+    ][:20]
+    return ResolvedSource(
+        url=selected["href"],
+        selector={
+            "type": "month_context",
+            "page_url": page_url,
+            "target_month": target_month,
+            "selected_text": selected["text"],
+            "selected_href": selected["href"],
+            "selected_filename": selected["basename"],
+            "candidate_count": len(selector_candidates),
+            "candidates": selector_candidates,
+        },
+    )
 
 
 def parse_target_month(source_snapshot_date: str) -> str:
@@ -593,6 +683,234 @@ def write_coverage_summary(path: Path, results: list[SourceResult]) -> None:
             )
 
 
+def build_source_units(
+    results: list[SourceResult],
+    *,
+    out_dir: Path,
+    source_id: str,
+    source_snapshot_date: str,
+) -> dict[str, Any]:
+    units: list[dict[str, Any]] = []
+    snapshot_month = parse_target_month(source_snapshot_date)
+    for result in results:
+        row = result.row
+        validation = {
+            "filename_rule": filename_rule_status(result),
+            "content_probe": "skipped",
+            "observed_categories": [],
+            "observed_source_kinds": [],
+            "errors": [],
+        }
+        status = source_unit_status_from_result(result)
+
+        if result.status == "downloaded" and result.output_path:
+            probe = probe_source_file(out_dir / safe_relative_path(result.output_path))
+            validation.update(probe)
+            status = source_unit_status_from_validation(row, probe)
+
+        raw_file = {
+            "path": result.output_path,
+            "filename": Path(result.output_path).name if result.output_path else "",
+            "byte_size": result.byte_size,
+            "sha256": result.sha256,
+        }
+        if result.status == "dry_run_resolved":
+            raw_file["filename"] = destination_filename(row, result.resolved_url).as_posix()
+
+        units.append(
+            {
+                "schema_version": 1,
+                "source_id": source_id,
+                "source_snapshot_date": source_snapshot_date,
+                "snapshot_month": snapshot_month,
+                "unit_id": f"{row.source_key}.{snapshot_month}",
+                "source_key": row.source_key,
+                "region": row.region,
+                "source_label": row.source_label,
+                "source_kind": row.source_type,
+                "source_category": row.pipeline_slug,
+                "fetch_type": row.fetch_type,
+                "selector": result.selector or {},
+                "raw_file": raw_file,
+                "validation": validation,
+                "status": status,
+                "error": result.error,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "source_id": source_id,
+        "source_snapshot_date": source_snapshot_date,
+        "snapshot_month": snapshot_month,
+        "unit_count": len(units),
+        "units": units,
+    }
+
+
+def build_source_coverage(
+    source_units: dict[str, Any],
+    *,
+    selected_count: int,
+    is_full_snapshot: bool,
+    source_snapshot_date: str,
+) -> dict[str, Any]:
+    units = source_units.get("units") if isinstance(source_units.get("units"), list) else []
+    by_category_and_kind: dict[str, dict[str, dict[str, int]]] = {}
+    failed = []
+    missing = []
+    for unit in units:
+        category = str(unit.get("source_category") or "unknown")
+        kind = str(unit.get("source_kind") or "unknown")
+        status = str(unit.get("status") or "unknown")
+        status_counts = by_category_and_kind.setdefault(category, {}).setdefault(kind, {})
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status == "missing":
+            missing.append(unit.get("unit_id"))
+        elif status not in {"ok", "dry_run_resolved"}:
+            failed.append(unit.get("unit_id"))
+
+    return {
+        "schema_version": 1,
+        "source_snapshot_date": source_snapshot_date,
+        "snapshot_month": source_units.get("snapshot_month", ""),
+        "is_full_snapshot": bool(is_full_snapshot),
+        "expected_units": selected_count,
+        "ok_units": sum(1 for unit in units if unit.get("status") == "ok"),
+        "missing_units": len(missing),
+        "failed_units": len(failed),
+        "by_category_and_kind": by_category_and_kind,
+        "failed_unit_ids": [str(value) for value in failed if value][:50],
+        "missing_unit_ids": [str(value) for value in missing if value][:50],
+    }
+
+
+def is_full_snapshot(args: argparse.Namespace) -> bool:
+    return (
+        bool(args.execute)
+        and args.artifact_mode == "encrypted_full"
+        and not csv_filter(args.pipeline_slug)
+        and not csv_filter(args.region)
+        and not csv_filter(args.source_type)
+        and not args.source_key
+        and int(args.max_sources or 0) == 0
+    )
+
+
+def source_unit_status_from_result(result: SourceResult) -> str:
+    if result.status == "downloaded":
+        return "ok"
+    if result.status == "dry_run_resolved":
+        return "dry_run_resolved"
+    return "error"
+
+
+def filename_rule_status(result: SourceResult) -> str:
+    if result.row.fetch_type != "month_context":
+        return "not_applicable"
+    if result.status == "error":
+        return "failed"
+    return "passed"
+
+
+def probe_source_file(path: Path) -> dict[str, Any]:
+    try:
+        payloads = xlsx_payloads(path)
+    except Exception as exc:
+        return {
+            "content_probe": "failed",
+            "observed_categories": [],
+            "observed_source_kinds": [],
+            "errors": [f"{type(exc).__name__}: {exc}"],
+        }
+    if not payloads:
+        return {
+            "content_probe": "failed",
+            "observed_categories": [],
+            "observed_source_kinds": [],
+            "errors": ["no xlsx payloads found"],
+        }
+
+    observed_categories: set[str] = set()
+    observed_source_kinds: set[str] = set()
+    errors: list[str] = []
+    for member_name, payload in payloads:
+        try:
+            inspection = inspect_xlsx_payload(member_name, payload)
+            observed_categories.update(inspection["categories"])
+            observed_source_kinds.update(inspection["source_kinds"])
+        except Exception as exc:
+            errors.append(f"{member_name}: {type(exc).__name__}: {exc}")
+
+    return {
+        "content_probe": "passed" if not errors else "partial",
+        "observed_categories": sorted(observed_categories),
+        "observed_source_kinds": sorted(observed_source_kinds),
+        "errors": errors[:5],
+    }
+
+
+def xlsx_payloads(path: Path) -> list[tuple[str, bytes]]:
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        return [(path.name, path.read_bytes())]
+    if suffix != ".zip":
+        return []
+    payloads: list[tuple[str, bytes]] = []
+    with zipfile.ZipFile(path) as archive:
+        for member_name in archive.namelist():
+            if member_name.lower().endswith(".xlsx"):
+                payloads.append((member_name, archive.read(member_name)))
+    return payloads
+
+
+def inspect_xlsx_payload(member_name: str, payload: bytes) -> dict[str, set[str]]:
+    try:
+        import openpyxl
+    except ImportError as exc:
+        raise RuntimeError("content probe requires openpyxl. Install openpyxl in the workflow.") from exc
+
+    categories: set[str] = set()
+    source_kinds: set[str] = set()
+    workbook = openpyxl.load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
+    try:
+        for sheet_name in workbook.sheetnames:
+            source_kinds.update(source_kinds_from_text(sheet_name))
+            worksheet = workbook[sheet_name]
+            for row in worksheet.iter_rows(max_row=25, values_only=True):
+                for cell in row:
+                    if cell is None:
+                        continue
+                    value = normalize_space(str(cell).replace("\u3000", " "))
+                    if value in SOURCE_CATEGORY_BY_LABEL:
+                        categories.add(SOURCE_CATEGORY_BY_LABEL[value])
+                    source_kinds.update(source_kinds_from_text(value))
+        source_kinds.update(source_kinds_from_text(member_name))
+    finally:
+        workbook.close()
+    return {"categories": categories, "source_kinds": source_kinds}
+
+
+def source_kinds_from_text(value: str) -> set[str]:
+    kinds: set[str] = set()
+    if "コード内容別" in value:
+        kinds.add("code_content")
+    if "届出受理" in value or "受理番号" in value:
+        kinds.add("todokede")
+    return kinds
+
+
+def source_unit_status_from_validation(row: SourceRow, probe: dict[str, Any]) -> str:
+    if probe.get("content_probe") == "failed":
+        return "content_probe_failed"
+    categories = set(str(value) for value in probe.get("observed_categories") or [])
+    if categories and row.pipeline_slug not in categories:
+        return "category_mismatch"
+    source_kinds = set(str(value) for value in probe.get("observed_source_kinds") or [])
+    if source_kinds and row.source_type not in source_kinds:
+        return "source_kind_mismatch"
+    return "ok"
+
+
 def write_run_manifests(
     *,
     out_dir: Path,
@@ -654,7 +972,7 @@ def write_sha256sums(out_dir: Path) -> None:
     (out_dir / "checksums" / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_json(path: Path, value: dict) -> None:
+def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
