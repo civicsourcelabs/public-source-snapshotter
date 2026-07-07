@@ -21,19 +21,6 @@
       "expected_filename": "000487376.zip"
     },
     {
-      "xpath": "(//a[contains(@href, \".zip\")])[1]",
-      "region": "中国四国",
-      "page_url": "https://kouseikyoku.mhlw.go.jp/chugokushikoku/chousaka/shisetsukijunjuri.html",
-      "priority": 10,
-      "fetch_type": "xpath",
-      "source_key": "dental-04945490aa982c2d646fc26c84150959",
-      "source_type": "todokede",
-      "source_label": "届出受理_歯科",
-      "pipeline_slug": "dental",
-      "download_subdir": "中国四国/届出受理",
-      "expected_filename": "000481051.zip"
-    },
-    {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[2]/div/table[1]/tbody/tr[1]/td[2]/ul/li[4]/a",
       "region": "佐賀",
       "page_url": "https://kouseikyoku.mhlw.go.jp/kyushu/gyomu/gyomu/hoken_kikan/index_00006.html",
@@ -355,7 +342,7 @@
       "expected_filename": "shitei_shika_r0805.zip"
     },
     {
-      "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[1]/table[1]/tbody/tr[12]/td[2]/a[2]",
+      "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[1]/table[1]/tbody/tr[12]/td[1]/a[2]",
       "region": "関東信越",
       "page_url": "https://kouseikyoku.mhlw.go.jp/kantoshinetsu/chousa/shitei.html",
       "priority": 20,
@@ -365,7 +352,7 @@
       "source_label": "コード内容別_歯科2",
       "pipeline_slug": "dental",
       "download_subdir": "関東信越/コード内容別_2",
-      "expected_filename": "shitei_ikaheisetsu_r0805.zip"
+      "expected_filename": ""
     },
     {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[1]/table[1]/tbody/tr[12]/td[2]/a",
@@ -430,7 +417,7 @@
       "source_label": "届出受理_医科",
       "pipeline_slug": "medical",
       "download_subdir": "中国四国/届出受理",
-      "expected_filename": "000481051.zip"
+      "expected_filename": ""
     },
     {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[2]/div/table[1]/tbody/tr[1]/td[2]/ul/li[4]/a",
@@ -767,7 +754,7 @@
       "expected_filename": "shitei_ika_r0805-1.zip"
     },
     {
-      "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[1]/table[1]/tbody/tr[12]/td[1]/a[2]",
+      "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[1]/table[1]/tbody/tr[12]/td[2]/a[2]",
       "region": "関東信越",
       "page_url": "https://kouseikyoku.mhlw.go.jp/kantoshinetsu/chousa/shitei.html",
       "priority": 20,
@@ -777,7 +764,7 @@
       "source_label": "コード内容別_医科2",
       "pipeline_slug": "medical",
       "download_subdir": "関東信越/コード内容別_2",
-      "expected_filename": "shitei_shikaheisetsu_r0805.zip"
+      "expected_filename": ""
     },
     {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[1]/table[1]/tbody/tr[12]/td[1]/a",
@@ -830,19 +817,6 @@
       "pipeline_slug": "pharmacy",
       "download_subdir": "中国四国/コード内容別_1",
       "expected_filename": "000483048.zip"
-    },
-    {
-      "xpath": "(//a[contains(@href, \".zip\")])[1]",
-      "region": "中国四国",
-      "page_url": "https://kouseikyoku.mhlw.go.jp/chugokushikoku/chousaka/shisetsukijunjuri.html",
-      "priority": 10,
-      "fetch_type": "xpath",
-      "source_key": "pharmacy-722dcf8b65f878c1dc1dfcad0e138360",
-      "source_type": "todokede",
-      "source_label": "届出受理_薬局",
-      "pipeline_slug": "pharmacy",
-      "download_subdir": "中国四国/届出受理",
-      "expected_filename": "000481051.zip"
     },
     {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[2]/div/table[1]/tbody/tr[1]/td[2]/ul/li[4]/a",

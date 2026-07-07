@@ -3,8 +3,7 @@
 Public-source MHLW monthly source-file collector.
 
 This collector reads a public manifest, resolves official source files, and
-optionally downloads raw ZIP/XLSX files into a handoff artifact. It does not
-parse private processing data and never talks to a private datastore.
+optionally downloads raw ZIP/XLSX files into a source artifact.
 """
 
 from __future__ import annotations
@@ -41,6 +40,11 @@ ALLOWED_SOURCE_TYPES = {"todokede", "code_content", "other", "unknown"}
 PRODUCT_LABEL_BY_SLUG = {"medical": "医科", "dental": "歯科", "pharmacy": "薬局"}
 PRODUCT_CODE_BY_SLUG = {"medical": "01", "dental": "03", "pharmacy": "04"}
 SOURCE_CATEGORY_BY_LABEL = {label: slug for slug, label in PRODUCT_LABEL_BY_SLUG.items()}
+ROMANIZED_CATEGORY_PATTERNS = {
+    "medical": re.compile(r"(?:^|[_\-.])ika(?:[_\-.]|heisetsu|$)", re.IGNORECASE),
+    "dental": re.compile(r"(?:^|[_\-.])shika(?:[_\-.]|heisetsu|$)", re.IGNORECASE),
+    "pharmacy": re.compile(r"(?:^|[_\-.])yakkyoku(?:[_\-.]|$)", re.IGNORECASE),
+}
 SOURCE_TITLE_BY_TYPE = {
     "todokede": "届出受理医療機関名簿",
     "code_content": "コード内容別医療機関一覧表",
@@ -871,9 +875,12 @@ def inspect_xlsx_payload(member_name: str, payload: bytes) -> dict[str, set[str]
 
     categories: set[str] = set()
     source_kinds: set[str] = set()
+    categories.update(source_categories_from_text(member_name, loose=True))
+    source_kinds.update(source_kinds_from_text(member_name))
     workbook = openpyxl.load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
     try:
         for sheet_name in workbook.sheetnames:
+            categories.update(source_categories_from_text(sheet_name, loose=True))
             source_kinds.update(source_kinds_from_text(sheet_name))
             worksheet = workbook[sheet_name]
             for row in worksheet.iter_rows(max_row=25, values_only=True):
@@ -881,13 +888,25 @@ def inspect_xlsx_payload(member_name: str, payload: bytes) -> dict[str, set[str]
                     if cell is None:
                         continue
                     value = normalize_space(str(cell).replace("\u3000", " "))
-                    if value in SOURCE_CATEGORY_BY_LABEL:
-                        categories.add(SOURCE_CATEGORY_BY_LABEL[value])
+                    categories.update(source_categories_from_text(value))
+                    if "現在" in value or "現存" in value or "コード内容別" in value:
+                        categories.update(source_categories_from_text(value, loose=True))
                     source_kinds.update(source_kinds_from_text(value))
-        source_kinds.update(source_kinds_from_text(member_name))
     finally:
         workbook.close()
     return {"categories": categories, "source_kinds": source_kinds}
+
+
+def source_categories_from_text(value: str, *, loose: bool = False) -> set[str]:
+    categories: set[str] = set()
+    normalized = normalize_space(value).lower()
+    for label, category in SOURCE_CATEGORY_BY_LABEL.items():
+        if normalized == label or (loose and label in normalized):
+            categories.add(category)
+    for category, pattern in ROMANIZED_CATEGORY_PATTERNS.items():
+        if pattern.search(normalized):
+            categories.add(category)
+    return categories
 
 
 def source_kinds_from_text(value: str) -> set[str]:
