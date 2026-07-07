@@ -5,7 +5,7 @@
 このcollectorが行うこと:
 
 - manifest validation
-- `direct_download` / `xpath` source resolution
+- `direct_download` / `xpath` / `month_context` source resolution
 - raw source file download
 - SHA256 checksum
 - source-level metrics

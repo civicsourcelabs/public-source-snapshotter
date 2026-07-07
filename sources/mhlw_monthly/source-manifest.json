@@ -190,30 +190,26 @@
       "expected_filename": "shisetsu-touhoku-shika-r0804.xlsx"
     },
     {
-      "xpath": "//a[contains(@href, \"01-03.zip\")]",
       "region": "東海北陸",
       "page_url": "https://kouseikyoku.mhlw.go.jp/tokaihokuriku/newpage_00287.html",
       "priority": 20,
-      "fetch_type": "xpath",
+      "fetch_type": "month_context",
       "source_key": "dental-5cde78b556af17bc0e71afcb9fbb356b",
       "source_type": "code_content",
       "source_label": "コード内容別_歯科1",
       "pipeline_slug": "dental",
-      "download_subdir": "東海北陸/コード内容別_1",
-      "expected_filename": "2605-01-03.zip"
+      "download_subdir": "東海北陸/コード内容別_1"
     },
     {
-      "xpath": "//a[contains(@href, \"06_10-03.zip\") and contains(., \"歯科\")]",
       "region": "東海北陸",
       "page_url": "https://kouseikyoku.mhlw.go.jp/tokaihokuriku/newpage_00349.html",
       "priority": 10,
-      "fetch_type": "xpath",
+      "fetch_type": "month_context",
       "source_key": "dental-715e26423c5c6617bf00846ae49da816",
       "source_type": "todokede",
       "source_label": "届出受理_歯科",
       "pipeline_slug": "dental",
-      "download_subdir": "東海北陸/届出受理",
-      "expected_filename": "2607-06_10-03.zip"
+      "download_subdir": "東海北陸/届出受理"
     },
     {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[2]/div/table[1]/tbody/tr[2]/td[4]/ul/li[4]/a",
@@ -606,30 +602,26 @@
       "expected_filename": "shisetsu-touhoku-ika-r0804.xlsx"
     },
     {
-      "xpath": "//a[contains(@href, \"01-01.zip\")]",
       "region": "東海北陸",
       "page_url": "https://kouseikyoku.mhlw.go.jp/tokaihokuriku/newpage_00287.html",
       "priority": 20,
-      "fetch_type": "xpath",
+      "fetch_type": "month_context",
       "source_key": "medical-ef17d912ecf9c1dc14533ce0a80e1c20",
       "source_type": "code_content",
       "source_label": "コード内容別_医科1",
       "pipeline_slug": "medical",
-      "download_subdir": "東海北陸/コード内容別_1",
-      "expected_filename": "2605-01-01.zip"
+      "download_subdir": "東海北陸/コード内容別_1"
     },
     {
-      "xpath": "//a[contains(@href, \"01-01.zip\")]",
       "region": "東海北陸",
       "page_url": "https://kouseikyoku.mhlw.go.jp/tokaihokuriku/newpage_00349.html",
       "priority": 10,
-      "fetch_type": "xpath",
+      "fetch_type": "month_context",
       "source_key": "medical-b2b0a98d304f5a1b02180242f842d86a",
       "source_type": "todokede",
       "source_label": "届出受理_医科",
       "pipeline_slug": "medical",
-      "download_subdir": "東海北陸/届出受理",
-      "expected_filename": "2605-06_01-01.zip"
+      "download_subdir": "東海北陸/届出受理"
     },
     {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[2]/div/table[1]/tbody/tr[2]/td[4]/ul/li[4]/a",
@@ -1009,30 +1001,26 @@
       "expected_filename": "shisetsu-touhoku-yakkyoku-r0804.xlsx"
     },
     {
-      "xpath": "//a[contains(@href, \"01-04.zip\")]",
       "region": "東海北陸",
       "page_url": "https://kouseikyoku.mhlw.go.jp/tokaihokuriku/newpage_00287.html",
       "priority": 20,
-      "fetch_type": "xpath",
+      "fetch_type": "month_context",
       "source_key": "pharmacy-94c609f4c2dec3880103f91a1c1a438d",
       "source_type": "code_content",
       "source_label": "コード内容別_薬局1",
       "pipeline_slug": "pharmacy",
-      "download_subdir": "東海北陸/コード内容別_1",
-      "expected_filename": "2605-01-04.zip"
+      "download_subdir": "東海北陸/コード内容別_1"
     },
     {
-      "xpath": "//a[contains(@href, \"01-04.zip\")]",
       "region": "東海北陸",
       "page_url": "https://kouseikyoku.mhlw.go.jp/tokaihokuriku/newpage_00349.html",
       "priority": 10,
-      "fetch_type": "xpath",
+      "fetch_type": "month_context",
       "source_key": "pharmacy-2deabf8778c15773108b98a7a84ae555",
       "source_type": "todokede",
       "source_label": "届出受理_薬局",
       "pipeline_slug": "pharmacy",
-      "download_subdir": "東海北陸/届出受理",
-      "expected_filename": "2605-06_01-04.zip"
+      "download_subdir": "東海北陸/届出受理"
     },
     {
       "xpath": "/html/body/div[1]/main/div[2]/div/div[1]/div[2]/div/table[1]/tbody/tr[2]/td[4]/ul/li[4]/a",
