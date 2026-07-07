@@ -34,8 +34,16 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (compatible; CivicSourceSnapshotter MHLW monthly collector; "
     "owner-approved-public-source-snapshot)"
 )
-ALLOWED_FETCH_TYPES = {"direct_download", "xpath"}
+ALLOWED_FETCH_TYPES = {"direct_download", "xpath", "month_context"}
 ALLOWED_SOURCE_TYPES = {"todokede", "code_content", "other", "unknown"}
+PRODUCT_LABEL_BY_SLUG = {"medical": "医科", "dental": "歯科", "pharmacy": "薬局"}
+PRODUCT_CODE_BY_SLUG = {"medical": "01", "dental": "03", "pharmacy": "04"}
+SOURCE_TITLE_BY_TYPE = {
+    "todokede": "届出受理医療機関名簿",
+    "code_content": "コード内容別医療機関一覧表",
+}
+REIWA_MONTH_RE = re.compile(r"令和([0-9０-９]+)年([0-9０-９]+)月(?:[0-9０-９]+日)?現在")
+FULLWIDTH_DIGIT_TRANSLATION = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
 @dataclass(frozen=True)
@@ -225,6 +233,12 @@ def validate_row(row: SourceRow) -> None:
         raise SystemExit(f"{row.source_key}: direct_download requires file_url")
     if row.fetch_type == "xpath" and not (row.page_url and row.xpath):
         raise SystemExit(f"{row.source_key}: xpath requires page_url and xpath")
+    if row.fetch_type == "month_context" and not row.page_url:
+        raise SystemExit(f"{row.source_key}: month_context requires page_url")
+    if row.fetch_type == "month_context" and row.source_type not in {"todokede", "code_content"}:
+        raise SystemExit(f"{row.source_key}: month_context requires a known monthly source_type")
+    if row.fetch_type == "month_context" and row.pipeline_slug not in PRODUCT_LABEL_BY_SLUG:
+        raise SystemExit(f"{row.source_key}: month_context requires a known pipeline_slug")
     safe_relative_path(row.download_subdir)
     if row.expected_filename:
         safe_relative_path(row.expected_filename)
@@ -300,6 +314,13 @@ def resolve_source_url(row: SourceRow, *, args: argparse.Namespace) -> str:
     if row.fetch_type == "direct_download":
         return row.file_url
     html_text = request_text(row.page_url, args=args)
+    if row.fetch_type == "month_context":
+        return resolve_month_context_href(
+            html_text,
+            page_url=row.page_url,
+            row=row,
+            source_snapshot_date=args.source_snapshot_date,
+        )
     return resolve_xpath_href(html_text, row.page_url, row.xpath)
 
 
@@ -331,6 +352,131 @@ def resolve_xpath_href(html_text: str, page_url: str, xpath: str) -> str:
     if not href:
         raise RuntimeError(f"XPath matched but href was empty: {xpath}")
     return urllib.parse.urljoin(page_url, href)
+
+
+def resolve_month_context_href(
+    html_text: str,
+    *,
+    page_url: str,
+    row: SourceRow,
+    source_snapshot_date: str,
+) -> str:
+    try:
+        from lxml import html as lxml_html
+    except ImportError as exc:
+        raise RuntimeError("month_context fetch_type requires lxml. Install lxml in the workflow.") from exc
+
+    target_month = parse_target_month(source_snapshot_date)
+    tree = lxml_html.fromstring(html_text)
+    candidates = []
+    for anchor in tree.xpath("//a[@href]"):
+        text = normalize_space(anchor.text_content())
+        href = urllib.parse.urljoin(page_url, anchor.get("href"))
+        context_text = normalize_space(" ".join(str(part) for part in anchor.xpath("preceding::text()")))
+        candidates.append(
+            {
+                "snapshot_month": latest_reiwa_month(context_text),
+                "format": latest_source_format(context_text),
+                "text": text,
+                "href": href,
+                "basename": resolved_basename(href),
+            }
+        )
+
+    source_title = SOURCE_TITLE_BY_TYPE[row.source_type]
+    product_label = PRODUCT_LABEL_BY_SLUG[row.pipeline_slug]
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate["snapshot_month"] == target_month
+        and candidate["format"] == "excel"
+        and source_title in candidate["text"]
+        and f"（{product_label}）" in candidate["text"]
+    ]
+    if len(matches) != 1:
+        summary = [
+            {
+                "snapshot_month": candidate["snapshot_month"],
+                "format": candidate["format"],
+                "text": candidate["text"],
+                "basename": candidate["basename"],
+            }
+            for candidate in candidates
+            if source_title in candidate["text"] and f"（{product_label}）" in candidate["text"]
+        ][:10]
+        raise RuntimeError(
+            "month_context expected one source link; "
+            f"resolved_count={len(matches)} target_month={target_month} "
+            f"source_type={row.source_type} pipeline_slug={row.pipeline_slug} links={summary}"
+        )
+    selected = matches[0]
+    validate_month_context_filename(
+        row,
+        basename=selected["basename"],
+        target_month=target_month,
+    )
+    return selected["href"]
+
+
+def parse_target_month(source_snapshot_date: str) -> str:
+    value = normalize_digits(source_snapshot_date.strip())
+    match = re.fullmatch(r"([0-9]{4})-([0-9]{2})(?:-[0-9]{2})?", value)
+    if not match:
+        raise RuntimeError(f"source_snapshot_date must be YYYY-MM or YYYY-MM-DD: {source_snapshot_date}")
+    return f"{match.group(1)}-{match.group(2)}"
+
+
+def latest_reiwa_month(text: str) -> str:
+    matches = list(REIWA_MONTH_RE.finditer(normalize_digits(text)))
+    if not matches:
+        return ""
+    last = matches[-1]
+    year = 2018 + int(last.group(1))
+    month = int(last.group(2))
+    return f"{year:04d}-{month:02d}"
+
+
+def latest_source_format(text: str) -> str:
+    normalized = normalize_space(text)
+    pdf_index = max(normalized.rfind("（1）PDFファイル"), normalized.rfind("(1) PDF"))
+    excel_index = max(
+        normalized.rfind("（2）エクセルファイル"),
+        normalized.rfind("(2) Excel"),
+        normalized.rfind("(2) Excel file"),
+    )
+    if excel_index > pdf_index:
+        return "excel"
+    if pdf_index >= 0:
+        return "pdf"
+    return ""
+
+
+def normalize_digits(value: str) -> str:
+    return value.translate(FULLWIDTH_DIGIT_TRANSLATION)
+
+
+def normalize_space(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def resolved_basename(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    return Path(urllib.parse.unquote(parsed.path)).name
+
+
+def validate_month_context_filename(row: SourceRow, *, basename: str, target_month: str) -> None:
+    code = PRODUCT_CODE_BY_SLUG[row.pipeline_slug]
+    yy_month = target_month[2:4] + target_month[5:7]
+    if row.source_type == "todokede":
+        pattern = rf"^{re.escape(yy_month)}-06_10-{re.escape(code)}\.zip$"
+    elif row.source_type == "code_content":
+        pattern = rf"^{re.escape(yy_month)}-01-{re.escape(code)}(?:_[0-9]+)?\.zip$"
+    else:
+        raise RuntimeError(f"month_context unsupported source_type={row.source_type}")
+    if not re.fullmatch(pattern, basename):
+        raise RuntimeError(
+            f"resolved filename did not match month_context pattern: basename={basename} pattern={pattern}"
+        )
 
 
 def request_text(url: str, *, args: argparse.Namespace) -> str:
@@ -582,6 +728,62 @@ def run_self_test() -> int:
         assert copied.read_bytes() == b"self-test-source"
         assert results[0].status == "downloaded"
         assert (out_dir / "checksums" / "SHA256SUMS").exists()
+        month_page = tmp_dir / "month-page.html"
+        month_page.write_text(
+            """
+            <html><body>
+              <p>（2）エクセルファイル</p>
+              <p>令和8年7月1日現在</p>
+              <ul>
+                <li><a href="2607-06_10-01.zip">届出受理医療機関名簿（医科）［ZIP形式］</a></li>
+                <li><a href="2607-06_10-03.zip">届出受理医療機関名簿（歯科）［ZIP形式］</a></li>
+              </ul>
+              <p>令和8年6月1日現在</p>
+              <ul>
+                <li><a href="2606-06_10-01.zip">届出受理医療機関名簿（医科）［ZIP形式］</a></li>
+              </ul>
+            </body></html>
+            """,
+            encoding="utf-8",
+        )
+        month_args = argparse.Namespace(**{**vars(args), "source_snapshot_date": "2026-07-01"})
+        month_row = SourceRow(
+            source_key="self-test-month",
+            pipeline_slug="medical",
+            region="self",
+            source_label="届出受理_self",
+            source_type="todokede",
+            fetch_type="month_context",
+            download_subdir="self/届出受理",
+            expected_filename="",
+            page_url=month_page.as_uri(),
+        )
+        assert resolve_source_url(month_row, args=month_args).endswith("/2607-06_10-01.zip")
+        code_page = tmp_dir / "code-page.html"
+        code_page.write_text(
+            """
+            <html><body>
+              <p>令和8年7月1日現在</p>
+              <p>（2）エクセルファイル</p>
+              <ul>
+                <li><a href="2607-01-01_2.zip">コード内容別医療機関一覧表（医科）［ZIP形式］</a></li>
+              </ul>
+            </body></html>
+            """,
+            encoding="utf-8",
+        )
+        code_row = SourceRow(
+            source_key="self-test-code",
+            pipeline_slug="medical",
+            region="self",
+            source_label="コード内容別_self",
+            source_type="code_content",
+            fetch_type="month_context",
+            download_subdir="self/コード内容別",
+            expected_filename="",
+            page_url=code_page.as_uri(),
+        )
+        assert resolve_source_url(code_row, args=month_args).endswith("/2607-01-01_2.zip")
         print(json.dumps({"status": "self_test_ok", "out_dir": str(out_dir)}, ensure_ascii=False))
     return 0
 

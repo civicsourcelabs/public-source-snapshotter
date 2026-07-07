@@ -25,6 +25,13 @@
 
 `expected_filename` が空の場合、collectorはresolved URLのbasenameを使います。
 
+`month_context` は、同じpageに複数の年月ブロックがあるsource向けです。
+
+- `source_snapshot_date` は `YYYY-MM` として解釈します。
+- 直前の令和年月、ファイル形式見出し、link text、hrefをsource linkごとに記録します。
+- Excel section内で、対象年月、source title、product labelが一致するlinkを1件だけ選びます。
+- 選んだZIP basenameが対象年月とsource type別のファイル名パターンに合わない場合は失敗します。
+
 ## Manifest source
 
 Full manifestはprivate registryから公開取得に必要なfieldだけをexportし、このrepoにPRで取り込みます。
