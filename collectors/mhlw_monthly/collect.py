@@ -39,6 +39,11 @@ ALLOWED_FETCH_TYPES = {"direct_download", "xpath", "month_context"}
 ALLOWED_SOURCE_TYPES = {"todokede", "code_content", "other", "unknown"}
 PRODUCT_LABEL_BY_SLUG = {"medical": "医科", "dental": "歯科", "pharmacy": "薬局"}
 PRODUCT_CODE_BY_SLUG = {"medical": "01", "dental": "03", "pharmacy": "04"}
+REQUIRED_SOURCE_TYPES_BY_PRODUCT = {
+    "medical": {"todokede", "code_content"},
+    "dental": {"todokede", "code_content"},
+    "pharmacy": {"todokede", "code_content"},
+}
 SOURCE_CATEGORY_BY_LABEL = {label: slug for slug, label in PRODUCT_LABEL_BY_SLUG.items()}
 ROMANIZED_CATEGORY_PATTERNS = {
     "medical": re.compile(r"(?:^|[_\-.])ika(?:[_\-.]|heisetsu|$)", re.IGNORECASE),
@@ -760,30 +765,69 @@ def build_source_coverage(
 ) -> dict[str, Any]:
     units = source_units.get("units") if isinstance(source_units.get("units"), list) else []
     by_category_and_kind: dict[str, dict[str, dict[str, int]]] = {}
+    by_region_category_and_kind: dict[str, dict[str, dict[str, dict[str, int]]]] = {}
+    available_by_category_region: dict[tuple[str, str], set[str]] = {}
     failed = []
     missing = []
     for unit in units:
         category = str(unit.get("source_category") or "unknown")
         kind = str(unit.get("source_kind") or "unknown")
+        region = str(unit.get("region") or "unknown")
         status = str(unit.get("status") or "unknown")
         status_counts = by_category_and_kind.setdefault(category, {}).setdefault(kind, {})
         status_counts[status] = status_counts.get(status, 0) + 1
+        regional_status_counts = (
+            by_region_category_and_kind.setdefault(region, {})
+            .setdefault(category, {})
+            .setdefault(kind, {})
+        )
+        regional_status_counts[status] = regional_status_counts.get(status, 0) + 1
+        available_by_category_region.setdefault((category, region), set()).add(kind)
         if status == "missing":
             missing.append(unit.get("unit_id"))
         elif status not in {"ok", "dry_run_resolved"}:
             failed.append(unit.get("unit_id"))
 
+    expected_missing = []
+    if is_full_snapshot:
+        for (category, region), present_kinds in sorted(available_by_category_region.items()):
+            required_kinds = REQUIRED_SOURCE_TYPES_BY_PRODUCT.get(category, set())
+            for kind in sorted(required_kinds - present_kinds):
+                unit_id = f"missing.{category}.{region}.{kind}.{source_units.get('snapshot_month', '')}"
+                expected_missing.append(
+                    {
+                        "unit_id": unit_id,
+                        "source_category": category,
+                        "source_kind": kind,
+                        "region": region,
+                        "reason": "missing_required_source_kind_for_region",
+                    }
+                )
+                by_category_and_kind.setdefault(category, {}).setdefault(kind, {})["missing"] = (
+                    by_category_and_kind.setdefault(category, {}).setdefault(kind, {}).get("missing", 0) + 1
+                )
+                regional_status_counts = (
+                    by_region_category_and_kind.setdefault(region, {})
+                    .setdefault(category, {})
+                    .setdefault(kind, {})
+                )
+                regional_status_counts["missing"] = regional_status_counts.get("missing", 0) + 1
+
+    missing.extend(item["unit_id"] for item in expected_missing)
+    failed_or_missing = failed + missing
     return {
         "schema_version": 1,
         "source_snapshot_date": source_snapshot_date,
         "snapshot_month": source_units.get("snapshot_month", ""),
         "is_full_snapshot": bool(is_full_snapshot),
-        "expected_units": selected_count,
+        "expected_units": selected_count + len(expected_missing),
         "ok_units": sum(1 for unit in units if unit.get("status") == "ok"),
         "missing_units": len(missing),
-        "failed_units": len(failed),
+        "failed_units": len(failed_or_missing),
         "by_category_and_kind": by_category_and_kind,
-        "failed_unit_ids": [str(value) for value in failed if value][:50],
+        "by_region_category_and_kind": by_region_category_and_kind,
+        "missing_expected_units": expected_missing[:50],
+        "failed_unit_ids": [str(value) for value in failed_or_missing if value][:50],
         "missing_unit_ids": [str(value) for value in missing if value][:50],
     }
 
@@ -1121,6 +1165,51 @@ def run_self_test() -> int:
             page_url=code_page.as_uri(),
         )
         assert resolve_source_url(code_row, args=month_args).endswith("/2607-01-01_2.zip")
+        source_unit_fixture = {
+            "snapshot_month": "2026-07",
+            "units": [
+                {
+                    "unit_id": "medical-self-todokede",
+                    "region": "self",
+                    "source_category": "medical",
+                    "source_kind": "todokede",
+                    "status": "ok",
+                },
+                {
+                    "unit_id": "medical-self-code",
+                    "region": "self",
+                    "source_category": "medical",
+                    "source_kind": "code_content",
+                    "status": "ok",
+                },
+                {
+                    "unit_id": "dental-self-code",
+                    "region": "self",
+                    "source_category": "dental",
+                    "source_kind": "code_content",
+                    "status": "ok",
+                },
+            ],
+        }
+        full_coverage = build_source_coverage(
+            source_unit_fixture,
+            selected_count=3,
+            is_full_snapshot=True,
+            source_snapshot_date="2026-07-01",
+        )
+        assert full_coverage["missing_units"] == 1
+        assert full_coverage["failed_units"] == 1
+        assert full_coverage["expected_units"] == 4
+        assert full_coverage["missing_expected_units"][0]["source_category"] == "dental"
+        assert full_coverage["missing_expected_units"][0]["source_kind"] == "todokede"
+        partial_coverage = build_source_coverage(
+            source_unit_fixture,
+            selected_count=3,
+            is_full_snapshot=False,
+            source_snapshot_date="2026-07-01",
+        )
+        assert partial_coverage["missing_units"] == 0
+        assert partial_coverage["failed_units"] == 0
         print(json.dumps({"status": "self_test_ok", "out_dir": str(out_dir)}, ensure_ascii=False))
     return 0
 
