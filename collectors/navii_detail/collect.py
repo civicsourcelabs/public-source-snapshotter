@@ -4,7 +4,7 @@ Public-source Navii detail-page snapshot collector.
 
 This collector reads official Navii open-data ZIP files, builds deterministic
 detail-page candidates, and optionally fetches approved source pages. It writes
-local shard artifacts only. It does not require or access any private datastore,
+local shard artifacts only. It does not require or access any external datastore,
 external-service secret, deploy provider, privileged role, or production secret.
 """
 
@@ -34,11 +34,11 @@ from pathlib import Path
 from typing import Iterable
 
 
-OPEN_DATA_FILES = {
-    "hospital": "01-1_hospital_facility_info_20251201.csv",
-    "clinic": "02-1_clinic_facility_info_20251201.csv",
-    "dental": "03-1_dental_facility_info_20251201.csv",
-    "pharmacy": "05_pharmacy_20251201.csv",
+OPEN_DATA_FILE_TEMPLATES = {
+    "hospital": "01-1_hospital_facility_info_{yyyymmdd}.csv",
+    "clinic": "02-1_clinic_facility_info_{yyyymmdd}.csv",
+    "dental": "03-1_dental_facility_info_{yyyymmdd}.csv",
+    "pharmacy": "05_pharmacy_{yyyymmdd}.csv",
 }
 
 NAVII_DETAIL_BASE = (
@@ -172,7 +172,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-snapshot-date",
-        default="2025-12-01",
+        default="",
         help="Official source snapshot date written to run-metrics.json.",
     )
     parser.add_argument(
@@ -407,10 +407,22 @@ def open_data_zip_for(open_data_dir: Path, csv_name: str) -> Path:
     raise FileNotFoundError(f"Could not find {csv_name} in {open_data_dir}")
 
 
-def read_open_data_rows(open_data_dir: Path, kinds: Iterable[str]) -> list[NaviiCandidate]:
+def open_data_csv_name(kind: str, source_snapshot_date: str) -> str:
+    yyyymmdd = source_snapshot_date.replace("-", "")
+    if not re.fullmatch(r"\d{8}", yyyymmdd):
+        raise ValueError(f"invalid source_snapshot_date: {source_snapshot_date}")
+    return OPEN_DATA_FILE_TEMPLATES[kind].format(yyyymmdd=yyyymmdd)
+
+
+def read_open_data_rows(
+    open_data_dir: Path,
+    kinds: Iterable[str],
+    *,
+    source_snapshot_date: str,
+) -> list[NaviiCandidate]:
     rows: list[NaviiCandidate] = []
     for kind in kinds:
-        csv_name = OPEN_DATA_FILES[kind]
+        csv_name = open_data_csv_name(kind, source_snapshot_date)
         zip_path = open_data_zip_for(open_data_dir, csv_name)
         with zipfile.ZipFile(zip_path) as archive:
             with archive.open(csv_name) as raw:
@@ -1395,6 +1407,8 @@ def ensure_required_args(args: argparse.Namespace) -> None:
         missing.append("--open-data-dir")
     if args.out_dir is None:
         missing.append("--out-dir")
+    if not args.source_snapshot_date:
+        missing.append("--source-snapshot-date")
     if missing:
         raise SystemExit(f"Missing required arguments: {', '.join(missing)}")
 
@@ -1445,13 +1459,17 @@ def main() -> int:
         return 0
 
     kinds = [kind.strip() for kind in args.kinds.split(",") if kind.strip()]
-    invalid = sorted(set(kinds) - set(OPEN_DATA_FILES))
+    invalid = sorted(set(kinds) - set(OPEN_DATA_FILE_TEMPLATES))
     if invalid:
         raise SystemExit(f"Unknown kind(s): {', '.join(invalid)}")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    all_rows = read_open_data_rows(args.open_data_dir, kinds)
+    all_rows = read_open_data_rows(
+        args.open_data_dir,
+        kinds,
+        source_snapshot_date=args.source_snapshot_date,
+    )
     selected_candidates = select_candidates(
         all_rows,
         kinds=kinds,

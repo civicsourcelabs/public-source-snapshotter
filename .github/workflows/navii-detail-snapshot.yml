@@ -2,8 +2,10 @@ name: "Source Snapshot: Navii Detail"
 
 on:
   schedule:
-    # Monthly full run at 00:30 JST on the 4th, before private prepare-load.
-    - cron: "30 15 3 * *"
+    # Semiannual readiness poll at 00:30 JST while Jun/Dec sources settle.
+    - cron: "30 15 4,7,10,13,16,19,22,25,28 6,12 *"
+    # Late readiness poll at 00:30 JST for delayed Jan/Jul publication windows.
+    - cron: "30 15 3,10,17,24,31 1,7 *"
   workflow_dispatch:
     inputs:
       execute:
@@ -21,16 +23,6 @@ on:
         options:
           - navii_detail
         default: navii_detail
-      source_snapshot_date:
-        description: "Official source snapshot date"
-        type: string
-        required: true
-        default: "2025-12-01"
-      run_label:
-        description: "Artifact label. Use collector-navii-detail-YYYYMMDD-canary/full"
-        type: string
-        required: true
-        default: "collector-navii-detail-20251201-canary"
       artifact_mode:
         description: "summary_only or encrypted_full"
         type: choice
@@ -128,6 +120,7 @@ on:
         default: "7"
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -149,6 +142,7 @@ jobs:
       source_id: ${{ steps.plan.outputs.source_id }}
       source_snapshot_date: ${{ steps.plan.outputs.source_snapshot_date }}
       run_label: ${{ steps.plan.outputs.run_label }}
+      skip_existing: ${{ steps.plan.outputs.skip_existing }}
       artifact_mode: ${{ steps.plan.outputs.artifact_mode }}
       kinds: ${{ steps.plan.outputs.kinds }}
       candidate_mode: ${{ steps.plan.outputs.candidate_mode }}
@@ -177,8 +171,6 @@ jobs:
           EXECUTE: ${{ inputs.execute }}
           CONFIRM: ${{ inputs.confirm }}
           SOURCE_ID: ${{ inputs.source_id }}
-          SOURCE_SNAPSHOT_DATE: ${{ inputs.source_snapshot_date }}
-          RUN_LABEL: ${{ inputs.run_label }}
           ARTIFACT_MODE: ${{ inputs.artifact_mode }}
           KINDS: ${{ inputs.kinds }}
           CANDIDATE_MODE: ${{ inputs.candidate_mode }}
@@ -197,13 +189,22 @@ jobs:
           MAX_PAGES_PER_SHARD: ${{ inputs.max_pages_per_shard }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ inputs.fail_on_fetch_error_rate }}
           ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json
           import os
           import re
+          import urllib.request
           from pathlib import Path
+
+          from collectors.navii_detail.source_readiness import (
+              expected_semiannual_snapshot_date,
+              load_html,
+              resolve_manifest,
+              run_label_for,
+          )
 
           def emit(name: str, value: str) -> None:
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
@@ -213,17 +214,75 @@ jobs:
               raw = os.environ.get(name, "")
               return raw if raw not in {"", "None"} else default
 
+          def successful_artifact_exists(run_label: str) -> bool:
+              token = os.environ.get("GITHUB_TOKEN", "")
+              repo = os.environ.get("GITHUB_REPOSITORY", "")
+              if not token or not repo:
+                  return False
+              api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+              prefix = f"navii-detail-handoff-{run_label}-"
+              headers = {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
+              for page in range(1, 11):
+                  request = urllib.request.Request(
+                      f"{api_url}/repos/{repo}/actions/artifacts?per_page=100&page={page}",
+                      headers=headers,
+                  )
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      payload = json.loads(response.read().decode("utf-8"))
+                  artifacts = payload.get("artifacts") or []
+                  for artifact in artifacts:
+                      name = str(artifact.get("name") or "")
+                      if not artifact.get("expired") and name.startswith(prefix):
+                          return True
+                  if len(artifacts) < 100:
+                      break
+              return False
+
           manifest_path = Path("sources/navii/source-manifest.json")
           manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          manifest_snapshot = manifest["source_snapshot_date"]
+          source_snapshot_date = expected_semiannual_snapshot_date()
+          insecure_skip_tls_verify = value("INSECURE_SKIP_TLS_VERIFY", "false").lower()
+          scheduled_run_label = run_label_for(source_snapshot_date, "full")
+          skip_existing = (
+              os.environ["EVENT_NAME"] == "schedule"
+              and successful_artifact_exists(scheduled_run_label)
+          )
+          # Fail closed before scheduling expensive shard jobs if the official
+          # page has not published the expected semiannual snapshot yet.
+          if not skip_existing:
+              resolve_manifest(
+                  manifest,
+                  page_html=load_html(
+                      manifest["source_terms_url"],
+                      insecure_skip_tls_verify=insecure_skip_tls_verify == "true",
+                  ),
+                  expected_snapshot_date=source_snapshot_date,
+              )
+
+          def run_label_suffix(resolved: dict[str, str]) -> str:
+              is_full = (
+                  resolved["execute"] == "true"
+                  and resolved["artifact_mode"] == "encrypted_full"
+                  and resolved["candidate_mode"] == "all"
+                  and resolved["shard_count"] == "16"
+                  and resolved["max_pages_per_shard"] == "0"
+              )
+              if is_full:
+                  return "full"
+              if resolved["artifact_mode"] == "encrypted_full":
+                  return "scope"
+              return "canary"
 
           if os.environ["EVENT_NAME"] == "schedule":
               resolved = {
                   "execute": "true",
                   "confirm": "owner-approved-public-source-snapshot",
                   "source_id": "navii_detail",
-                  "source_snapshot_date": manifest_snapshot,
-                  "run_label": f"collector-navii-detail-{manifest_snapshot.replace('-', '')}-full",
+                  "source_snapshot_date": source_snapshot_date,
                   "artifact_mode": "encrypted_full",
                   "kinds": "hospital,clinic,dental,pharmacy",
                   "candidate_mode": "all",
@@ -237,7 +296,7 @@ jobs:
                   "timeout_seconds": "30",
                   "retry_count": "2",
                   "retry_backoff_seconds": "2",
-                  "insecure_skip_tls_verify": "false",
+                  "insecure_skip_tls_verify": insecure_skip_tls_verify,
                   "max_pages_per_shard": "0",
                   "fail_on_fetch_error_rate": "5",
                   "artifact_retention_days": "14",
@@ -248,8 +307,7 @@ jobs:
                   "execute": value("EXECUTE", "false").lower(),
                   "confirm": value("CONFIRM", ""),
                   "source_id": value("SOURCE_ID", "navii_detail"),
-                  "source_snapshot_date": value("SOURCE_SNAPSHOT_DATE", manifest_snapshot),
-                  "run_label": value("RUN_LABEL", f"collector-navii-detail-{manifest_snapshot.replace('-', '')}-canary"),
+                  "source_snapshot_date": source_snapshot_date,
                   "artifact_mode": value("ARTIFACT_MODE", "summary_only"),
                   "kinds": value("KINDS", "hospital,clinic,dental,pharmacy"),
                   "candidate_mode": value("CANDIDATE_MODE", "all"),
@@ -263,12 +321,18 @@ jobs:
                   "timeout_seconds": value("TIMEOUT_SECONDS", "30"),
                   "retry_count": value("RETRY_COUNT", "2"),
                   "retry_backoff_seconds": value("RETRY_BACKOFF_SECONDS", "2"),
-                  "insecure_skip_tls_verify": value("INSECURE_SKIP_TLS_VERIFY", "false").lower(),
+                  "insecure_skip_tls_verify": insecure_skip_tls_verify,
                   "max_pages_per_shard": value("MAX_PAGES_PER_SHARD", "400"),
                   "fail_on_fetch_error_rate": value("FAIL_ON_FETCH_ERROR_RATE", "5"),
                   "artifact_retention_days": value("ARTIFACT_RETENTION_DAYS", "7"),
               }
               raw_indexes = os.environ.get("SHARD_INDEXES", "").strip()
+
+          resolved["run_label"] = run_label_for(
+              resolved["source_snapshot_date"],
+              run_label_suffix(resolved),
+          )
+          resolved["skip_existing"] = "true" if skip_existing else "false"
 
           execute = resolved["execute"] == "true"
           confirm = resolved["confirm"]
@@ -305,6 +369,7 @@ jobs:
   prepare-source:
     name: "Prepare official source files"
     needs: validate
+    if: needs.validate.outputs.skip_existing != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -313,18 +378,30 @@ jobs:
 
       - name: Download official source ZIPs
         env:
-          SOURCE_MANIFEST: sources/navii/source-manifest.json
+          SOURCE_MANIFEST_TEMPLATE: sources/navii/source-manifest.json
           SOURCE_DIR: ${{ runner.temp }}/source-open-data
+          SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
+          INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
         run: |
           set -euo pipefail
           mkdir -p "$SOURCE_DIR"
+          readiness_args=(
+            --manifest "$SOURCE_MANIFEST_TEMPLATE"
+            --out "$SOURCE_DIR/source-snapshot-manifest.json"
+            --expected-source-snapshot-date "$SOURCE_SNAPSHOT_DATE"
+            --summary-json "$SOURCE_DIR/source-readiness-summary.json"
+          )
+          if [ "$INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
+            readiness_args+=(--insecure-skip-tls-verify)
+          fi
+          python3 collectors/navii_detail/source_readiness.py "${readiness_args[@]}"
           python3 - <<'PY'
           import json
           import os
           import subprocess
           from pathlib import Path
 
-          manifest = json.loads(Path(os.environ["SOURCE_MANIFEST"]).read_text(encoding="utf-8"))
+          manifest = json.loads((Path(os.environ["SOURCE_DIR"]) / "source-snapshot-manifest.json").read_text(encoding="utf-8"))
           out_dir = Path(os.environ["SOURCE_DIR"])
           for source in manifest["source_urls"]:
               target = out_dir / source["expected_filename"]
@@ -357,6 +434,7 @@ jobs:
     needs:
       - validate
       - prepare-source
+    if: needs.validate.outputs.skip_existing != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -486,6 +564,7 @@ jobs:
     needs:
       - validate
       - collect
+    if: needs.validate.outputs.skip_existing != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -512,9 +591,22 @@ jobs:
           MAX_PARALLEL: ${{ needs.validate.outputs.max_parallel }}
           WORKERS: ${{ needs.validate.outputs.workers }}
           PACKAGE_DIR: ${{ runner.temp }}/package
+          SOURCE_MANIFEST_TEMPLATE: sources/navii/source-manifest.json
+          INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
         run: |
           set -euo pipefail
           mkdir -p "$PACKAGE_DIR/manifest" "$PACKAGE_DIR/metrics" "$PACKAGE_DIR/checksums" "$PACKAGE_DIR/encrypted"
+          readiness_args=(
+            --manifest "$SOURCE_MANIFEST_TEMPLATE"
+            --out "$PACKAGE_DIR/manifest/source-snapshot-manifest.json"
+            --expected-source-snapshot-date "$SOURCE_SNAPSHOT_DATE"
+            --run-label-suffix "${RUN_LABEL##*-}"
+            --summary-json "$PACKAGE_DIR/manifest/source-readiness-summary.json"
+          )
+          if [ "$INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
+            readiness_args+=(--insecure-skip-tls-verify)
+          fi
+          python3 collectors/navii_detail/source_readiness.py "${readiness_args[@]}"
           python3 - <<'PY'
           import json
           import os
@@ -548,7 +640,6 @@ jobs:
               encoding="utf-8",
           )
           PY
-          cp sources/navii/source-manifest.json "$PACKAGE_DIR/manifest/source-snapshot-manifest.json"
           cp -R "${{ runner.temp }}/shards" "$PACKAGE_DIR/shard-packages"
           while IFS= read -r -d '' file; do
             shard_name="$(basename "$(dirname "$(dirname "$file")")")"

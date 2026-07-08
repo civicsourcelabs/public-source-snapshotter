@@ -2,55 +2,55 @@
   "schema_version": "1.0",
   "source_id": "navii_detail",
   "source_name": "medical-information-net-open-data",
-  "source_snapshot_date": "2025-12-01",
+  "source_snapshot_date": "auto",
   "source_terms_url": "https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryou/newpage_43373.html",
   "source_urls": [
     {
       "kind": "hospital_facility",
       "facility_kind": "hospital",
-      "url": "https://www.mhlw.go.jp/content/11121000/01-1_hospital_facility_info_20251201.zip",
-      "expected_filename": "hospital_facility.zip"
+      "expected_filename": "hospital_facility.zip",
+      "official_link_text": "病院(施設票)"
     },
     {
       "kind": "hospital_speciality_hours",
       "facility_kind": "hospital",
-      "url": "https://www.mhlw.go.jp/content/11121000/01-2_hospital_speciality_hours_20251201.zip",
-      "expected_filename": "hospital_speciality_hours.zip"
+      "expected_filename": "hospital_speciality_hours.zip",
+      "official_link_text": "病院(診療科・診療時間票)"
     },
     {
       "kind": "clinic_facility",
       "facility_kind": "clinic",
-      "url": "https://www.mhlw.go.jp/content/11121000/02-1_clinic_facility_info_20251201.zip",
-      "expected_filename": "clinic_facility.zip"
+      "expected_filename": "clinic_facility.zip",
+      "official_link_text": "診療所(施設票)"
     },
     {
       "kind": "clinic_speciality_hours",
       "facility_kind": "clinic",
-      "url": "https://www.mhlw.go.jp/content/11121000/02-2_clinic_speciality_hours_20251201.zip",
-      "expected_filename": "clinic_speciality_hours.zip"
+      "expected_filename": "clinic_speciality_hours.zip",
+      "official_link_text": "診療所(診療科・診療時間票)"
     },
     {
       "kind": "dental_facility",
       "facility_kind": "dental",
-      "url": "https://www.mhlw.go.jp/content/11121000/03-1_dental_facility_info_20251201.zip",
-      "expected_filename": "dental_facility.zip"
+      "expected_filename": "dental_facility.zip",
+      "official_link_text": "歯科診療所(施設票)"
     },
     {
       "kind": "dental_speciality_hours",
       "facility_kind": "dental",
-      "url": "https://www.mhlw.go.jp/content/11121000/03-2_dental_speciality_hours_20251201.zip",
-      "expected_filename": "dental_speciality_hours.zip"
+      "expected_filename": "dental_speciality_hours.zip",
+      "official_link_text": "歯科診療所(診療科・診療時間票)"
     },
     {
       "kind": "pharmacy",
       "facility_kind": "pharmacy",
-      "url": "https://www.mhlw.go.jp/content/11121000/05_pharmacy_20251201.zip",
-      "expected_filename": "pharmacy.zip"
+      "expected_filename": "pharmacy.zip",
+      "official_link_text": "薬局"
     }
   ],
   "notes": [
-    "Public source URLs only.",
-    "Do not include private candidate CSV, private processing results, or load scripts in this manifest.",
-    "Update source_snapshot_date and URLs together."
+    "Public source resolution only.",
+    "Do not include non-source candidate files, derived processing results, or operational scripts in this manifest.",
+    "Workflow resolves the dated source URLs from source_terms_url and fails closed when the expected semiannual snapshot is missing."
   ]
 }
