@@ -1,6 +1,6 @@
 # Artifact Schema
 
-public source snapshotterからprivate consumerへ渡すartifact contractです。
+public source snapshotterからconsumerへ渡すartifact contractです。
 
 public repoのartifactは第三者に見られる前提で扱います。summary / metricsは平文でよい一方、施設単位のfull artifactは暗号化します。
 
@@ -30,8 +30,8 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
   "schema_version": "1.0",
   "collector_repo": "owner/repository",
   "source_id": "navii_detail",
-  "source_snapshot_date": "2025-12-01",
-  "run_label": "collector-navii-detail-20251201-canary",
+  "source_snapshot_date": "2026-06-01",
+  "run_label": "collector-navii-detail-20260601-canary",
   "github_run_id": "123456789",
   "github_run_url": "https://github.com/owner/repository/actions/runs/123456789",
   "completed_at": "2026-06-01T00:00:00Z",
@@ -55,7 +55,7 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
 {
   "schema_version": "1.0",
   "source_id": "navii_detail",
-  "source_snapshot_date": "2025-12-01",
+  "source_snapshot_date": "2026-06-01",
   "candidate_count": 400,
   "fetch_ok_count": 400,
   "fetch_error_count": 0,
@@ -74,7 +74,7 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
 {
   "schema_version": "1.0",
   "source_id": "navii_detail",
-  "source_snapshot_date": "2025-12-01",
+  "source_snapshot_date": "2026-06-01",
   "shard_count": 1,
   "shards": [
     {
@@ -160,6 +160,6 @@ logに出さない:
 - 施設単位の全件table rows
 - 復号済みartifact本文
 - operator-only filesystem paths
-- private candidate CSV
-- private processing result
+- downstream candidate CSV
+- downstream processing result
 - secret / token

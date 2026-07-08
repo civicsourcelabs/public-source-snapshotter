@@ -2,7 +2,7 @@
 
 public repo側で実装するcollectorのCLI contractです。
 
-`collect.py` は公式open data ZIPからdetail URL候補を作り、owner承認時だけdetail HTMLを取得するpublic-source collectorです。private datastore、external-service secret、deploy provider、production secretには接続しません。
+`collect.py` は公式open data ZIPからdetail URL候補を作り、owner承認時だけdetail HTMLを取得するpublic-source collectorです。external datastore、external-service secret、deploy provider、production secretには接続しません。
 
 ## CLI
 
@@ -11,8 +11,8 @@ python3 collectors/navii_detail/collect.py \
   --source-dir "$SOURCE_DIR" \
   --out-dir "$OUT_DIR" \
   --source-id navii_detail \
-  --source-snapshot-date 2025-12-01 \
-  --run-label collector-navii-detail-20251201-canary \
+  --source-snapshot-date "$SOURCE_SNAPSHOT_DATE" \
+  --run-label "$RUN_LABEL" \
   --artifact-mode summary_only \
   --kinds hospital,clinic,dental,pharmacy \
   --shard-count 1 \
@@ -32,18 +32,22 @@ python3 collectors/navii_detail/collect.py \
 
 - official open data ZIPs under `--source-dir`
 - source manifest under `sources/navii/source-manifest.json`
-- manual workflow inputs
+- workflow-derived `source_snapshot_date` and `run_label`
 
 `--insecure-skip-tls-verify` is for owner-approved TLS certificate troubleshooting only. Do not use it as the default path.
 
 The collector must not require:
 
-- private datastore
+- external datastore
 - payment provider
 - deploy provider
-- private candidate CSV
+- downstream candidate CSV
 - service role
 - production secret
+
+`source_snapshot_date` and `run_label` are derived by
+`collectors/navii_detail/source_readiness.py` in the workflow. They are not
+normal workflow inputs.
 
 ## Outputs
 
@@ -94,8 +98,8 @@ The collector may write facility-level rows to local shard artifact files, but t
 
 The collector must not write:
 
-- private datastore ids
-- private processing confidence
+- external datastore ids
+- downstream processing confidence
 - owner review notes
-- private datastore load script
+- datastore load script
 - secret / token values
