@@ -54,6 +54,8 @@ SOURCE_TITLE_BY_TYPE = {
     "todokede": "届出受理医療機関名簿",
     "code_content": "コード内容別医療機関一覧表",
 }
+XLSX_PROBE_HEADER_SCAN_ROWS = 50
+CATEGORY_COLUMN_HEADER = "区分"
 REIWA_MONTH_RE = re.compile(r"令和([0-9０-９]+)年([0-9０-９]+)月(?:[0-9０-９]+日)?現在")
 FULLWIDTH_DIGIT_TRANSLATION = str.maketrans("０１２３４５６７８９", "0123456789")
 
@@ -726,26 +728,33 @@ def build_source_units(
         if result.status == "dry_run_resolved":
             raw_file["filename"] = destination_filename(row, result.resolved_url).as_posix()
 
-        units.append(
-            {
-                "schema_version": 1,
-                "source_id": source_id,
-                "source_snapshot_date": source_snapshot_date,
-                "snapshot_month": snapshot_month,
-                "unit_id": f"{row.source_key}.{snapshot_month}",
-                "source_key": row.source_key,
-                "region": row.region,
-                "source_label": row.source_label,
-                "source_kind": row.source_type,
-                "source_category": row.pipeline_slug,
-                "fetch_type": row.fetch_type,
-                "selector": result.selector or {},
-                "raw_file": raw_file,
-                "validation": validation,
-                "status": status,
-                "error": result.error,
-            }
-        )
+        for category in source_unit_categories(row, validation):
+            unit_status = status
+            if result.status == "downloaded" and result.output_path:
+                unit_status = source_unit_status_from_validation(row, validation, source_category=category)
+            unit_id = f"{row.source_key}.{snapshot_month}"
+            if category != row.pipeline_slug:
+                unit_id = f"{row.source_key}.{category}.{snapshot_month}"
+            units.append(
+                {
+                    "schema_version": 1,
+                    "source_id": source_id,
+                    "source_snapshot_date": source_snapshot_date,
+                    "snapshot_month": snapshot_month,
+                    "unit_id": unit_id,
+                    "source_key": row.source_key,
+                    "region": row.region,
+                    "source_label": row.source_label,
+                    "source_kind": row.source_type,
+                    "source_category": category,
+                    "fetch_type": row.fetch_type,
+                    "selector": result.selector or {},
+                    "raw_file": raw_file,
+                    "validation": validation,
+                    "status": unit_status,
+                    "error": result.error,
+                }
+            )
     return {
         "schema_version": 1,
         "source_id": source_id,
@@ -820,7 +829,7 @@ def build_source_coverage(
         "source_snapshot_date": source_snapshot_date,
         "snapshot_month": source_units.get("snapshot_month", ""),
         "is_full_snapshot": bool(is_full_snapshot),
-        "expected_units": selected_count + len(expected_missing),
+        "expected_units": len(units) + len(expected_missing),
         "ok_units": sum(1 for unit in units if unit.get("status") == "ok"),
         "missing_units": len(missing),
         "failed_units": len(failed_or_missing),
@@ -927,18 +936,41 @@ def inspect_xlsx_payload(member_name: str, payload: bytes) -> dict[str, set[str]
             categories.update(source_categories_from_text(sheet_name, loose=True))
             source_kinds.update(source_kinds_from_text(sheet_name))
             worksheet = workbook[sheet_name]
-            for row in worksheet.iter_rows(max_row=25, values_only=True):
-                for cell in row:
+            category_columns: set[tuple[int, int]] = set()
+            for row_index, row in enumerate(
+                worksheet.iter_rows(max_row=XLSX_PROBE_HEADER_SCAN_ROWS, values_only=True),
+                start=1,
+            ):
+                for column_index, cell in enumerate(row, start=1):
                     if cell is None:
                         continue
-                    value = normalize_space(str(cell).replace("\u3000", " "))
+                    value = normalize_probe_cell(cell)
                     categories.update(source_categories_from_text(value))
                     if "現在" in value or "現存" in value or "コード内容別" in value:
                         categories.update(source_categories_from_text(value, loose=True))
                     source_kinds.update(source_kinds_from_text(value))
+                    if value == CATEGORY_COLUMN_HEADER:
+                        category_columns.add((row_index, column_index))
+            for header_row_index, column_index in sorted(category_columns):
+                for row in worksheet.iter_rows(
+                    min_row=header_row_index + 1,
+                    min_col=column_index,
+                    max_col=column_index,
+                    values_only=True,
+                ):
+                    cell = row[0] if row else None
+                    if cell is None:
+                        continue
+                    categories.update(source_categories_from_text(normalize_probe_cell(cell)))
+                    if len(categories.intersection(PRODUCT_LABEL_BY_SLUG)) == len(PRODUCT_LABEL_BY_SLUG):
+                        break
     finally:
         workbook.close()
     return {"categories": categories, "source_kinds": source_kinds}
+
+
+def normalize_probe_cell(value: Any) -> str:
+    return normalize_space(str(value).replace("\u3000", " "))
 
 
 def source_categories_from_text(value: str, *, loose: bool = False) -> set[str]:
@@ -962,11 +994,29 @@ def source_kinds_from_text(value: str) -> set[str]:
     return kinds
 
 
-def source_unit_status_from_validation(row: SourceRow, probe: dict[str, Any]) -> str:
+def source_unit_categories(row: SourceRow, validation: dict[str, Any]) -> list[str]:
+    observed = {
+        str(value)
+        for value in validation.get("observed_categories") or []
+        if str(value) in PRODUCT_LABEL_BY_SLUG
+    }
+    categories = {row.pipeline_slug, *observed}
+    ordered = [row.pipeline_slug]
+    ordered.extend(sorted(category for category in categories if category != row.pipeline_slug))
+    return ordered
+
+
+def source_unit_status_from_validation(
+    row: SourceRow,
+    probe: dict[str, Any],
+    *,
+    source_category: str | None = None,
+) -> str:
     if probe.get("content_probe") == "failed":
         return "content_probe_failed"
+    expected_category = source_category or row.pipeline_slug
     categories = set(str(value) for value in probe.get("observed_categories") or [])
-    if categories and row.pipeline_slug not in categories:
+    if categories and expected_category not in categories:
         return "category_mismatch"
     source_kinds = set(str(value) for value in probe.get("observed_source_kinds") or [])
     if source_kinds and row.source_type not in source_kinds:
@@ -1165,16 +1215,67 @@ def run_self_test() -> int:
             page_url=code_page.as_uri(),
         )
         assert resolve_source_url(code_row, args=month_args).endswith("/2607-01-01_2.zip")
+        try:
+            import openpyxl
+        except ImportError as exc:
+            raise AssertionError("self-test requires openpyxl") from exc
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "届出受理"
+        sheet.append(["[令和8年7月1日現在]"])
+        sheet.append([])
+        sheet.append(["項番", "都道府県名", "区分", "医療機関名称", "受理記号"])
+        for index in range(30):
+            sheet.append([index + 1, "self", "医科", f"medical-{index}", "届出受理"])
+        sheet.append([31, "self", "歯科", "dental-late", "届出受理"])
+        sheet.append([32, "self", "薬局", "pharmacy-late", "届出受理"])
+        workbook_bytes = io.BytesIO()
+        workbook.save(workbook_bytes)
+        workbook.close()
+        multi_category_zip = out_dir / "raw-files" / "self" / "届出受理" / "multi-category.zip"
+        multi_category_zip.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(multi_category_zip, "w") as archive:
+            archive.writestr("multi-category.xlsx", workbook_bytes.getvalue())
+        multi_probe = probe_source_file(multi_category_zip)
+        assert multi_probe["observed_categories"] == ["dental", "medical", "pharmacy"]
+        assert "todokede" in multi_probe["observed_source_kinds"]
+        multi_row = SourceRow(
+            source_key="self-test-multi",
+            pipeline_slug="medical",
+            region="self",
+            source_label="届出受理_self",
+            source_type="todokede",
+            fetch_type="direct_download",
+            file_url=multi_category_zip.as_uri(),
+            download_subdir="self/届出受理",
+            expected_filename="multi-category.zip",
+        )
+        multi_result = SourceResult(
+            row=multi_row,
+            status="downloaded",
+            resolved_url=multi_category_zip.as_uri(),
+            selector={"type": "direct_download"},
+            output_path=multi_category_zip.relative_to(out_dir).as_posix(),
+            byte_size=multi_category_zip.stat().st_size,
+            sha256=sha256_file(multi_category_zip),
+        )
+        multi_source_units = build_source_units(
+            [multi_result],
+            out_dir=out_dir,
+            source_id=args.source_id,
+            source_snapshot_date="2026-07-01",
+        )
+        assert multi_source_units["unit_count"] == 3
+        assert [unit["source_category"] for unit in multi_source_units["units"]] == [
+            "medical",
+            "dental",
+            "pharmacy",
+        ]
+        assert all(unit["status"] == "ok" for unit in multi_source_units["units"])
         source_unit_fixture = {
             "snapshot_month": "2026-07",
             "units": [
-                {
-                    "unit_id": "medical-self-todokede",
-                    "region": "self",
-                    "source_category": "medical",
-                    "source_kind": "todokede",
-                    "status": "ok",
-                },
+                *multi_source_units["units"],
                 {
                     "unit_id": "medical-self-code",
                     "region": "self",
@@ -1189,22 +1290,27 @@ def run_self_test() -> int:
                     "source_kind": "code_content",
                     "status": "ok",
                 },
+                {
+                    "unit_id": "pharmacy-self-code",
+                    "region": "self",
+                    "source_category": "pharmacy",
+                    "source_kind": "code_content",
+                    "status": "ok",
+                },
             ],
         }
         full_coverage = build_source_coverage(
             source_unit_fixture,
-            selected_count=3,
+            selected_count=6,
             is_full_snapshot=True,
             source_snapshot_date="2026-07-01",
         )
-        assert full_coverage["missing_units"] == 1
-        assert full_coverage["failed_units"] == 1
-        assert full_coverage["expected_units"] == 4
-        assert full_coverage["missing_expected_units"][0]["source_category"] == "dental"
-        assert full_coverage["missing_expected_units"][0]["source_kind"] == "todokede"
+        assert full_coverage["missing_units"] == 0
+        assert full_coverage["failed_units"] == 0
+        assert full_coverage["expected_units"] == 6
         partial_coverage = build_source_coverage(
             source_unit_fixture,
-            selected_count=3,
+            selected_count=6,
             is_full_snapshot=False,
             source_snapshot_date="2026-07-01",
         )
