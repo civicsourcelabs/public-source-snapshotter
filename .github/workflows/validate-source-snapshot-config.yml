@@ -1,0 +1,44 @@
+name: "Validate: Source Snapshot Config"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/mhlw-monthly-source-snapshot.yml"
+      - ".github/workflows/validate-source-snapshot-config.yml"
+      - "collectors/mhlw_monthly/**"
+      - "tests/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/mhlw-monthly-source-snapshot.yml"
+      - ".github/workflows/validate-source-snapshot-config.yml"
+      - "collectors/mhlw_monthly/**"
+      - "tests/**"
+
+concurrency:
+  group: validate-source-snapshot-config-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: "MHLW automation contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run MHLW workflow contract tests
+        run: python3 -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Install MHLW collector dependencies
+        run: python3 -m pip install --disable-pip-version-check lxml openpyxl
+
+      - name: Run MHLW collector self-test
+        run: python3 collectors/mhlw_monthly/collect.py --self-test
