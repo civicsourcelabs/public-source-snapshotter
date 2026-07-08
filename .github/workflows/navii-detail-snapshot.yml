@@ -2,10 +2,8 @@ name: "Source Snapshot: Navii Detail"
 
 on:
   schedule:
-    # Semiannual readiness poll at 00:30 JST while Jun/Dec sources settle.
-    - cron: "30 15 4,7,10,13,16,19,22,25,28 6,12 *"
-    # Late readiness poll at 00:30 JST for delayed Jan/Jul publication windows.
-    - cron: "30 15 3,10,17,24,31 1,7 *"
+    # Monthly readiness poll at 00:30 JST on the 5th.
+    - cron: "30 15 4 * *"
   workflow_dispatch:
     inputs:
       execute:
@@ -200,7 +198,7 @@ jobs:
           from pathlib import Path
 
           from collectors.navii_detail.source_readiness import (
-              expected_semiannual_snapshot_date,
+              expected_monthly_snapshot_date,
               load_html,
               resolve_manifest,
               run_label_for,
@@ -244,7 +242,7 @@ jobs:
 
           manifest_path = Path("sources/navii/source-manifest.json")
           manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          source_snapshot_date = expected_semiannual_snapshot_date()
+          source_snapshot_date = expected_monthly_snapshot_date()
           insecure_skip_tls_verify = value("INSECURE_SKIP_TLS_VERIFY", "false").lower()
           scheduled_run_label = run_label_for(source_snapshot_date, "full")
           skip_existing = (
@@ -252,7 +250,7 @@ jobs:
               and successful_artifact_exists(scheduled_run_label)
           )
           # Fail closed before scheduling expensive shard jobs if the official
-          # page has not published the expected semiannual snapshot yet.
+          # page has not published the expected monthly snapshot yet.
           if not skip_existing:
               resolve_manifest(
                   manifest,
