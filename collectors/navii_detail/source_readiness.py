@@ -125,13 +125,9 @@ def parse_snapshot_heading(value: str) -> str:
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
-def expected_semiannual_snapshot_date(today: date | None = None) -> str:
+def expected_monthly_snapshot_date(today: date | None = None) -> str:
     today = today or datetime.now(ZoneInfo("Asia/Tokyo")).date()
-    if today.month >= 12:
-        return f"{today.year:04d}-12-01"
-    if today.month >= 6:
-        return f"{today.year:04d}-06-01"
-    return f"{today.year - 1:04d}-12-01"
+    return date(today.year, today.month, 1).isoformat()
 
 
 def load_html(
@@ -220,8 +216,8 @@ def run_label_for(snapshot_date: str, suffix: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--out", type=Path)
     parser.add_argument("--html-file", type=Path)
     parser.add_argument("--expected-source-snapshot-date", default="")
     parser.add_argument("--today", default="")
@@ -237,11 +233,13 @@ def main() -> int:
     if args.self_test:
         run_self_test()
         return 0
+    if not args.manifest or not args.out:
+        raise SystemExit("--manifest and --out are required unless --self-test is used")
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     today = date.fromisoformat(args.today) if args.today else None
     expected_snapshot_date = (
-        args.expected_source_snapshot_date or expected_semiannual_snapshot_date(today)
+        args.expected_source_snapshot_date or expected_monthly_snapshot_date(today)
     )
     page_html = (
         args.html_file.read_text(encoding="utf-8")
@@ -286,6 +284,14 @@ def run_self_test() -> None:
     <a href="/content/11121000/03-1_dental_facility_info_20260601.zip">歯科診療所 (施設票)</a>
     <a href="/content/11121000/03-2_dental_speciality_hours_20260601.zip">歯科診療所 (診療科・診療時間票）</a>
     <a href="/content/11121000/05_pharmacy_20260601.zip">薬局</a>
+    <h3>2026年８月１日時点</h3>
+    <a href="/content/11121000/01-1_hospital_facility_info_20260801.zip">病院 (施設票)</a>
+    <a href="/content/11121000/01-2_hospital_speciality_hours_20260801.zip">病院 (診療科・診療時間票）</a>
+    <a href="/content/11121000/02-1_clinic_facility_info_20260801.zip">診療所 (施設票)</a>
+    <a href="/content/11121000/02-2_clinic_speciality_hours_20260801.zip">診療所 (診療科・診療時間票）</a>
+    <a href="/content/11121000/03-1_dental_facility_info_20260801.zip">歯科診療所 (施設票)</a>
+    <a href="/content/11121000/03-2_dental_speciality_hours_20260801.zip">歯科診療所 (診療科・診療時間票）</a>
+    <a href="/content/11121000/05_pharmacy_20260801.zip">薬局</a>
     """
     manifest = {
         "schema_version": "1.0",
@@ -301,9 +307,16 @@ def run_self_test() -> None:
     )
     assert resolved["source_snapshot_date"] == "2026-06-01"
     assert len(resolved["source_urls"]) == len(SOURCE_SPECS)
-    assert expected_semiannual_snapshot_date(date(2026, 5, 31)) == "2025-12-01"
-    assert expected_semiannual_snapshot_date(date(2026, 6, 5)) == "2026-06-01"
-    assert expected_semiannual_snapshot_date(date(2026, 12, 8)) == "2026-12-01"
+    assert run_label_for("2026-08-01", "full") == "collector-navii-detail-20260801-full"
+    assert expected_monthly_snapshot_date(date(2026, 7, 5)) == "2026-07-01"
+    assert expected_monthly_snapshot_date(date(2026, 8, 5)) == "2026-08-01"
+    assert expected_monthly_snapshot_date(date(2027, 1, 5)) == "2027-01-01"
+    try:
+        resolve_manifest(manifest, page_html=html_fixture, expected_snapshot_date="2026-07-01")
+    except ValueError as exc:
+        assert "expected source snapshot 2026-07-01" in str(exc)
+    else:
+        raise AssertionError("missing expected snapshot must fail closed")
 
 
 if __name__ == "__main__":

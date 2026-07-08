@@ -9,7 +9,7 @@ from pathlib import Path
 
 from collectors.navii_detail.source_readiness import (
     SOURCE_SPECS,
-    expected_semiannual_snapshot_date,
+    expected_monthly_snapshot_date,
     resolve_manifest,
     run_label_for,
 )
@@ -30,6 +30,14 @@ HTML_FIXTURE = """
   <a href="/content/11121000/03-1_dental_facility_info_20260601.zip">歯科診療所 (施設票)</a>
   <a href="/content/11121000/03-2_dental_speciality_hours_20260601.zip">歯科診療所 (診療科・診療時間票）</a>
   <a href="/content/11121000/05_pharmacy_20260601.zip">薬局</a>
+  <h3>2026年８月１日時点</h3>
+  <a href="/content/11121000/01-1_hospital_facility_info_20260801.zip">病院 (施設票)</a>
+  <a href="/content/11121000/01-2_hospital_speciality_hours_20260801.zip">病院 (診療科・診療時間票）</a>
+  <a href="/content/11121000/02-1_clinic_facility_info_20260801.zip">診療所 (施設票)</a>
+  <a href="/content/11121000/02-2_clinic_speciality_hours_20260801.zip">診療所 (診療科・診療時間票）</a>
+  <a href="/content/11121000/03-1_dental_facility_info_20260801.zip">歯科診療所 (施設票)</a>
+  <a href="/content/11121000/03-2_dental_speciality_hours_20260801.zip">歯科診療所 (診療科・診療時間票）</a>
+  <a href="/content/11121000/05_pharmacy_20260801.zip">薬局</a>
 </body></html>
 """
 
@@ -43,11 +51,10 @@ class NaviiSourceReadinessTest(unittest.TestCase):
             "source_urls": [],
         }
 
-    def test_expected_semiannual_snapshot_date_is_derived_from_jst_date(self) -> None:
-        self.assertEqual(expected_semiannual_snapshot_date(date(2026, 1, 15)), "2025-12-01")
-        self.assertEqual(expected_semiannual_snapshot_date(date(2026, 6, 5)), "2026-06-01")
-        self.assertEqual(expected_semiannual_snapshot_date(date(2026, 11, 30)), "2026-06-01")
-        self.assertEqual(expected_semiannual_snapshot_date(date(2026, 12, 8)), "2026-12-01")
+    def test_expected_monthly_snapshot_date_is_derived_from_jst_date(self) -> None:
+        self.assertEqual(expected_monthly_snapshot_date(date(2026, 7, 5)), "2026-07-01")
+        self.assertEqual(expected_monthly_snapshot_date(date(2026, 8, 5)), "2026-08-01")
+        self.assertEqual(expected_monthly_snapshot_date(date(2027, 1, 5)), "2027-01-01")
 
     def test_resolve_manifest_uses_expected_official_snapshot(self) -> None:
         resolved = resolve_manifest(
@@ -69,11 +76,11 @@ class NaviiSourceReadinessTest(unittest.TestCase):
         )
 
     def test_missing_expected_snapshot_fails_closed(self) -> None:
-        with self.assertRaisesRegex(ValueError, "expected source snapshot 2026-12-01"):
+        with self.assertRaisesRegex(ValueError, "expected source snapshot 2026-07-01"):
             resolve_manifest(
                 self.manifest,
                 page_html=HTML_FIXTURE,
-                expected_snapshot_date="2026-12-01",
+                expected_snapshot_date="2026-07-01",
             )
 
     def test_missing_required_link_fails_closed(self) -> None:
@@ -92,6 +99,10 @@ class NaviiSourceReadinessTest(unittest.TestCase):
         self.assertEqual(
             run_label_for("2026-06-01", "full"),
             "collector-navii-detail-20260601-full",
+        )
+        self.assertEqual(
+            run_label_for("2026-08-01", "full"),
+            "collector-navii-detail-20260801-full",
         )
         self.assertEqual(
             run_label_for("2026-12-01", "scope"),

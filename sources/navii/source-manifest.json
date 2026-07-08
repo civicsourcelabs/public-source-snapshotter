@@ -51,6 +51,6 @@
   "notes": [
     "Public source resolution only.",
     "Do not include non-source candidate files, derived processing results, or operational scripts in this manifest.",
-    "Workflow resolves the dated source URLs from source_terms_url and fails closed when the expected semiannual snapshot is missing."
+    "Workflow resolves the dated source URLs from source_terms_url and fails closed when the expected monthly snapshot is missing."
   ]
 }
