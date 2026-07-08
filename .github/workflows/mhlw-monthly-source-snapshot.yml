@@ -17,16 +17,6 @@ on:
         type: string
         required: false
         default: ""
-      source_snapshot_date:
-        description: "Official source snapshot date"
-        type: string
-        required: true
-        default: "2026-04-01"
-      run_label:
-        description: "Artifact label. Use collector-mhlw-monthly-YYYYMM-canary/full"
-        type: string
-        required: true
-        default: "collector-mhlw-monthly-202604-canary"
       artifact_mode:
         description: "summary_only or encrypted_full"
         type: choice
@@ -117,8 +107,6 @@ jobs:
           EXECUTE: ${{ inputs.execute }}
           CONFIRM: ${{ inputs.confirm }}
           SOURCE_MANIFEST: ${{ inputs.source_manifest }}
-          SOURCE_SNAPSHOT_DATE: ${{ inputs.source_snapshot_date }}
-          RUN_LABEL: ${{ inputs.run_label }}
           ARTIFACT_MODE: ${{ inputs.artifact_mode }}
           PIPELINE_SLUG: ${{ inputs.pipeline_slug }}
           REGION: ${{ inputs.region }}
@@ -151,19 +139,45 @@ jobs:
               raw = os.environ.get(name, "")
               return raw if raw not in {"", "None"} else default
 
+          def is_active_filter(raw: str) -> bool:
+              return bool(raw.strip())
+
+          def target_month_start() -> str:
+              jst_now = datetime.now(ZoneInfo("Asia/Tokyo"))
+              return f"{jst_now:%Y-%m}-01"
+
+          def run_label_for(resolved: dict[str, str]) -> str:
+              yyyymm = resolved["source_snapshot_date"][:7].replace("-", "")
+              is_full = (
+                  resolved["execute"].lower() == "true"
+                  and resolved["artifact_mode"] == "encrypted_full"
+                  and resolved["max_sources"] == "0"
+                  and not is_active_filter(resolved["pipeline_slug"])
+                  and not is_active_filter(resolved["region"])
+                  and not is_active_filter(resolved["source_type"])
+              )
+              if is_full:
+                  suffix = "full"
+              elif (
+                  resolved["artifact_mode"] == "encrypted_full"
+                  or is_active_filter(resolved["pipeline_slug"])
+                  or is_active_filter(resolved["region"])
+                  or is_active_filter(resolved["source_type"])
+              ):
+                  suffix = "scope"
+              else:
+                  suffix = "canary"
+              return f"collector-mhlw-monthly-{yyyymm}-{suffix}"
+
           if event_name == "schedule":
               source_manifest = default_manifest
               if not Path(source_manifest).exists():
                   raise SystemExit(f"scheduled run requires source manifest: {source_manifest}")
-              jst_now = datetime.now(ZoneInfo("Asia/Tokyo"))
-              source_snapshot_date = f"{jst_now:%Y-%m}-01"
-              run_label = f"collector-mhlw-monthly-{source_snapshot_date[:7].replace('-', '')}-full"
               resolved = {
                   "execute": "true",
                   "confirm": "owner-approved-public-source-snapshot",
                   "source_manifest": source_manifest,
-                  "source_snapshot_date": source_snapshot_date,
-                  "run_label": run_label,
+                  "source_snapshot_date": target_month_start(),
                   "artifact_mode": "encrypted_full",
                   "pipeline_slug": "",
                   "region": "",
@@ -177,13 +191,13 @@ jobs:
                   "insecure_skip_tls_verify": "false",
                   "artifact_retention_days": "7",
               }
+              resolved["run_label"] = run_label_for(resolved)
           else:
               resolved = {
                   "execute": value("EXECUTE", "false").lower(),
                   "confirm": value("CONFIRM", ""),
                   "source_manifest": value("SOURCE_MANIFEST", default_manifest),
-                  "source_snapshot_date": value("SOURCE_SNAPSHOT_DATE", "2026-04-01"),
-                  "run_label": value("RUN_LABEL", "collector-mhlw-monthly-202604-canary"),
+                  "source_snapshot_date": target_month_start(),
                   "artifact_mode": value("ARTIFACT_MODE", "summary_only"),
                   "pipeline_slug": value("PIPELINE_SLUG", ""),
                   "region": value("REGION", ""),
@@ -197,6 +211,7 @@ jobs:
                   "insecure_skip_tls_verify": value("INSECURE_SKIP_TLS_VERIFY", "false").lower(),
                   "artifact_retention_days": value("ARTIFACT_RETENTION_DAYS", "7"),
               }
+              resolved["run_label"] = run_label_for(resolved)
 
           for key, resolved_value in resolved.items():
               emit(key, str(resolved_value))

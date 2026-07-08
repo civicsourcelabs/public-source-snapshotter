@@ -139,7 +139,7 @@ def main() -> int:
         raise SystemExit("--manifest and --out-dir are required")
 
     manifest = load_manifest(args.manifest)
-    source_snapshot_date = args.source_snapshot_date or str(manifest.get("source_snapshot_date") or "")
+    source_snapshot_date = args.source_snapshot_date or current_jst_month_start()
     source_id = args.source_id or str(manifest.get("source_id") or "mhlw_monthly")
 
     rows = select_rows(
@@ -155,7 +155,7 @@ def main() -> int:
 
     out_dir = args.out_dir
     prepare_output_dirs(out_dir)
-    write_json(out_dir / "manifest" / "source-snapshot-manifest.json", manifest)
+    write_json(out_dir / "manifest" / "source-snapshot-manifest.json", snapshot_manifest(manifest, source_snapshot_date))
 
     results: list[SourceResult] = []
     for row in rows:
@@ -525,6 +525,20 @@ def parse_target_month(source_snapshot_date: str) -> str:
     if not match:
         raise RuntimeError(f"source_snapshot_date must be YYYY-MM or YYYY-MM-DD: {source_snapshot_date}")
     return f"{match.group(1)}-{match.group(2)}"
+
+
+def current_jst_month_start() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:  # pragma: no cover - Python 3.8+ provides zoneinfo.
+        return datetime.now(timezone.utc).date().replace(day=1).isoformat()
+    return datetime.now(ZoneInfo("Asia/Tokyo")).date().replace(day=1).isoformat()
+
+
+def snapshot_manifest(manifest: dict[str, Any], source_snapshot_date: str) -> dict[str, Any]:
+    out = dict(manifest)
+    out["source_snapshot_date"] = source_snapshot_date
+    return out
 
 
 def latest_reiwa_month(text: str) -> str:
@@ -1099,7 +1113,7 @@ def run_self_test() -> int:
             "schema_version": "1.0",
             "source_id": "mhlw_monthly",
             "source_name": "self-test",
-            "source_snapshot_date": "2026-04-01",
+            "source_snapshot_date": "2026-03-01",
             "source_urls": [
                 {
                     "source_key": "self-test-direct",
@@ -1140,6 +1154,9 @@ def run_self_test() -> int:
             insecure_skip_tls_verify=False,
             self_test=False,
         )
+        rewritten_manifest = snapshot_manifest(manifest, args.source_snapshot_date)
+        assert rewritten_manifest["source_snapshot_date"] == "2026-04-01"
+        assert manifest["source_snapshot_date"] == "2026-03-01"
         manifest_loaded = load_manifest(args.manifest)
         rows = parse_source_rows(manifest_loaded)
         prepare_output_dirs(out_dir)
