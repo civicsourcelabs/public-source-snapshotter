@@ -1181,6 +1181,5 @@
   ],
   "manifest_mode": "full_from_owner_source_registry",
   "schema_version": "1.0",
-  "source_terms_url": "https://www.mhlw.go.jp/",
-  "source_snapshot_date": "2026-06-01"
+  "source_terms_url": "https://www.mhlw.go.jp/"
 }
