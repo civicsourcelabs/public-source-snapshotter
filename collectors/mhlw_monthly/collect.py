@@ -583,7 +583,10 @@ def validate_month_context_filename(row: SourceRow, *, basename: str, target_mon
     code = PRODUCT_CODE_BY_SLUG[row.pipeline_slug]
     yy_month = target_month[2:4] + target_month[5:7]
     if row.source_type == "todokede":
-        pattern = rf"^{re.escape(yy_month)}-06_10-{re.escape(code)}\.zip$"
+        # The publisher-controlled two-digit sequence changed from 10 in July
+        # 2026 to 01 in August 2026. Keep the stable month/source/product
+        # identity checks while allowing that sequence to vary by publication.
+        pattern = rf"^{re.escape(yy_month)}-06_[0-9]{{2}}-{re.escape(code)}\.zip$"
     elif row.source_type == "code_content":
         pattern = rf"^{re.escape(yy_month)}-01-{re.escape(code)}(?:_[0-9]+)?\.zip$"
     else:
@@ -1181,6 +1184,12 @@ def run_self_test() -> int:
             """
             <html><body>
               <p>（2）エクセルファイル</p>
+              <p>令和8年8月1日現在</p>
+              <ul>
+                <li><a href="2608-06_01-01.zip">届出受理医療機関名簿（医科）［ZIP形式］</a></li>
+                <li><a href="2608-06_01-03.zip">届出受理医療機関名簿（歯科）［ZIP形式］</a></li>
+                <li><a href="2608-06_01-04.zip">届出受理医療機関名簿（薬局）［ZIP形式］</a></li>
+              </ul>
               <p>令和8年7月1日現在</p>
               <ul>
                 <li><a href="2607-06_10-01.zip">届出受理医療機関名簿（医科）［ZIP形式］</a></li>
@@ -1207,6 +1216,22 @@ def run_self_test() -> int:
             page_url=month_page.as_uri(),
         )
         assert resolve_source_url(month_row, args=month_args).endswith("/2607-06_10-01.zip")
+        august_args = argparse.Namespace(**{**vars(args), "source_snapshot_date": "2026-08-01"})
+        for pipeline_slug, product_code in PRODUCT_CODE_BY_SLUG.items():
+            august_row = SourceRow(
+                source_key=f"self-test-month-{pipeline_slug}",
+                pipeline_slug=pipeline_slug,
+                region="self",
+                source_label=f"届出受理_{pipeline_slug}",
+                source_type="todokede",
+                fetch_type="month_context",
+                download_subdir=f"self/届出受理/{pipeline_slug}",
+                expected_filename="",
+                page_url=month_page.as_uri(),
+            )
+            assert resolve_source_url(august_row, args=august_args).endswith(
+                f"/2608-06_01-{product_code}.zip"
+            )
         code_page = tmp_dir / "code-page.html"
         code_page.write_text(
             """
