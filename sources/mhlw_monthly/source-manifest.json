@@ -416,6 +416,7 @@
       "source_type": "todokede",
       "source_label": "届出受理_医科",
       "pipeline_slug": "medical",
+      "source_categories": ["medical", "dental", "pharmacy"],
       "download_subdir": "中国四国/届出受理",
       "expected_filename": ""
     },
