@@ -74,6 +74,7 @@ class SourceRow:
     xpath: str = ""
     file_url: str = ""
     priority: int = 0
+    source_categories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -262,6 +263,11 @@ def parse_source_rows(manifest: dict) -> list[SourceRow]:
             xpath=str(raw.get("xpath") or ""),
             file_url=str(raw.get("file_url") or ""),
             priority=int(raw.get("priority") or index),
+            source_categories=tuple(
+                str(value).strip()
+                for value in (raw.get("source_categories") or [])
+                if str(value).strip()
+            ),
         )
         validate_row(row)
         rows.append(row)
@@ -278,6 +284,15 @@ def required(raw: dict, key: str) -> str:
 def validate_row(row: SourceRow) -> None:
     if row.fetch_type not in ALLOWED_FETCH_TYPES:
         raise SystemExit(f"{row.source_key}: unsupported fetch_type={row.fetch_type}")
+    unsupported_categories = set(row.source_categories) - set(PRODUCT_LABEL_BY_SLUG)
+    if unsupported_categories:
+        raise SystemExit(
+            f"{row.source_key}: unsupported source_categories={sorted(unsupported_categories)}"
+        )
+    if row.source_categories and row.pipeline_slug not in row.source_categories:
+        raise SystemExit(
+            f"{row.source_key}: source_categories must include pipeline_slug={row.pipeline_slug}"
+        )
     if row.source_type not in ALLOWED_SOURCE_TYPES:
         raise SystemExit(f"{row.source_key}: unsupported source_type={row.source_type}")
     if row.fetch_type == "direct_download" and not row.file_url:
@@ -745,7 +760,7 @@ def build_source_units(
         if result.status == "dry_run_resolved":
             raw_file["filename"] = destination_filename(row, result.resolved_url).as_posix()
 
-        for category in source_unit_categories(row, validation):
+        for category in source_unit_categories(row):
             unit_status = status
             if result.status == "downloaded" and result.output_path:
                 unit_status = source_unit_status_from_validation(row, validation, source_category=category)
@@ -1011,16 +1026,11 @@ def source_kinds_from_text(value: str) -> set[str]:
     return kinds
 
 
-def source_unit_categories(row: SourceRow, validation: dict[str, Any]) -> list[str]:
-    observed = {
-        str(value)
-        for value in validation.get("observed_categories") or []
-        if str(value) in PRODUCT_LABEL_BY_SLUG
-    }
-    categories = {row.pipeline_slug, *observed}
-    ordered = [row.pipeline_slug]
-    ordered.extend(sorted(category for category in categories if category != row.pipeline_slug))
-    return ordered
+def source_unit_categories(row: SourceRow) -> list[str]:
+    """Return manifest-declared ownership; content probes only validate it."""
+    if row.source_categories:
+        return list(dict.fromkeys(row.source_categories))
+    return [row.pipeline_slug]
 
 
 def source_unit_status_from_validation(
@@ -1291,6 +1301,7 @@ def run_self_test() -> int:
             file_url=multi_category_zip.as_uri(),
             download_subdir="self/届出受理",
             expected_filename="multi-category.zip",
+            source_categories=("medical", "dental", "pharmacy"),
         )
         multi_result = SourceResult(
             row=multi_row,
@@ -1314,6 +1325,35 @@ def run_self_test() -> int:
             "pharmacy",
         ]
         assert all(unit["status"] == "ok" for unit in multi_source_units["units"])
+        dedicated_row = SourceRow(
+            source_key="self-test-dedicated-dental",
+            pipeline_slug="dental",
+            region="self",
+            source_label="届出受理_歯科",
+            source_type="todokede",
+            fetch_type="direct_download",
+            file_url=multi_category_zip.as_uri(),
+            download_subdir="self/届出受理",
+            expected_filename="shisetsu-touhoku-shika-r0804.xlsx",
+        )
+        dedicated_result = SourceResult(
+            row=dedicated_row,
+            status="downloaded",
+            resolved_url=multi_category_zip.as_uri(),
+            selector={"type": "direct_download"},
+            output_path=multi_category_zip.relative_to(out_dir).as_posix(),
+            byte_size=multi_category_zip.stat().st_size,
+            sha256=sha256_file(multi_category_zip),
+        )
+        dedicated_source_units = build_source_units(
+            [dedicated_result],
+            out_dir=out_dir,
+            source_id=args.source_id,
+            source_snapshot_date="2026-07-01",
+        )
+        assert dedicated_source_units["unit_count"] == 1
+        assert dedicated_source_units["units"][0]["source_category"] == "dental"
+        assert dedicated_source_units["units"][0]["status"] == "ok"
         source_unit_fixture = {
             "snapshot_month": "2026-07",
             "units": [
