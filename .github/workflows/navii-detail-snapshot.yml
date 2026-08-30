@@ -198,7 +198,6 @@ jobs:
           from pathlib import Path
 
           from collectors.navii_detail.source_readiness import (
-              expected_monthly_snapshot_date,
               load_html,
               resolve_manifest,
               run_label_for,
@@ -242,24 +241,23 @@ jobs:
 
           manifest_path = Path("sources/navii/source-manifest.json")
           manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          source_snapshot_date = expected_monthly_snapshot_date()
           insecure_skip_tls_verify = value("INSECURE_SKIP_TLS_VERIFY", "false").lower()
+          resolved_source_manifest = resolve_manifest(
+              manifest,
+              page_html=load_html(
+                  manifest["source_terms_url"],
+                  insecure_skip_tls_verify=insecure_skip_tls_verify == "true",
+              ),
+          )
+          source_snapshot_date = str(resolved_source_manifest["source_snapshot_date"])
           scheduled_run_label = run_label_for(source_snapshot_date, "full")
           skip_existing = (
               os.environ["EVENT_NAME"] == "schedule"
               and successful_artifact_exists(scheduled_run_label)
           )
-          # Fail closed before scheduling expensive shard jobs if the official
-          # page has not published the expected monthly snapshot yet.
-          if not skip_existing:
-              resolve_manifest(
-                  manifest,
-                  page_html=load_html(
-                      manifest["source_terms_url"],
-                      insecure_skip_tls_verify=insecure_skip_tls_verify == "true",
-                  ),
-                  expected_snapshot_date=source_snapshot_date,
-              )
+          # Resolve the newest official snapshot before scheduling expensive
+          # shard jobs. A missing current-month publication is not an error;
+          # a failure while processing the selected snapshot remains fatal.
 
           def run_label_suffix(resolved: dict[str, str]) -> str:
               is_full = (

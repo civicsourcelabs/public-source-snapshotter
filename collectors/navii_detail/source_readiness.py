@@ -148,26 +148,59 @@ def parse_open_data_links(source_url: str, page_html: str) -> dict[str, dict[str
     return parser.links_by_snapshot
 
 
+def latest_available_snapshot_date(
+    links_by_snapshot: dict[str, dict[str, str]],
+    *,
+    as_of_date: date | None = None,
+) -> str:
+    """Return the newest official snapshot that was public by ``as_of_date``."""
+    effective_as_of = as_of_date or datetime.now(ZoneInfo("Asia/Tokyo")).date()
+    available_dates: list[date] = []
+    for value in links_by_snapshot:
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            continue
+        if parsed <= effective_as_of:
+            available_dates.append(parsed)
+    if not available_dates:
+        available = ", ".join(sorted(links_by_snapshot, reverse=True)) or "none"
+        raise ValueError(
+            "no official source snapshot was available by "
+            f"{effective_as_of.isoformat()}; available snapshots: {available}"
+        )
+    return max(available_dates).isoformat()
+
+
 def resolve_manifest(
     manifest: dict,
     *,
     page_html: str,
-    expected_snapshot_date: str,
+    expected_snapshot_date: str = "",
+    as_of_date: date | None = None,
 ) -> dict:
     source_terms_url = str(manifest.get("source_terms_url") or "")
     if not source_terms_url:
         raise ValueError("source_terms_url is required")
     links_by_snapshot = parse_open_data_links(source_terms_url, page_html)
     available_dates = sorted(links_by_snapshot, reverse=True)
-    if expected_snapshot_date not in links_by_snapshot:
+    selection_mode = "explicit"
+    selected_snapshot_date = expected_snapshot_date.strip()
+    if not selected_snapshot_date:
+        selected_snapshot_date = latest_available_snapshot_date(
+            links_by_snapshot,
+            as_of_date=as_of_date,
+        )
+        selection_mode = "latest_available"
+    if selected_snapshot_date not in links_by_snapshot:
         available = ", ".join(available_dates) or "none"
         raise ValueError(
-            f"expected source snapshot {expected_snapshot_date} was not found; "
+            f"requested source snapshot {selected_snapshot_date} was not found; "
             f"available snapshots: {available}"
         )
 
-    compact_date = expected_snapshot_date.replace("-", "")
-    links = links_by_snapshot[expected_snapshot_date]
+    compact_date = selected_snapshot_date.replace("-", "")
+    links = links_by_snapshot[selected_snapshot_date]
     source_urls: list[dict[str, str]] = []
     missing: list[str] = []
     date_mismatches: list[str] = []
@@ -188,20 +221,22 @@ def resolve_manifest(
             }
         )
     if missing:
-        raise ValueError(f"missing source links for {expected_snapshot_date}: {', '.join(missing)}")
+        raise ValueError(f"missing source links for {selected_snapshot_date}: {', '.join(missing)}")
     if date_mismatches:
         raise ValueError(
-            f"source link date did not match {expected_snapshot_date}: "
+            f"source link date did not match {selected_snapshot_date}: "
             + "; ".join(date_mismatches)
         )
 
     resolved = dict(manifest)
-    resolved["source_snapshot_date"] = expected_snapshot_date
+    resolved["source_snapshot_date"] = selected_snapshot_date
     resolved["source_urls"] = source_urls
     resolved["resolved_at"] = datetime.now(timezone.utc).isoformat()
     resolved["resolution"] = {
         "mode": "official_page",
-        "expected_snapshot_date": expected_snapshot_date,
+        "selection_mode": selection_mode,
+        "as_of_date": (as_of_date or datetime.now(ZoneInfo("Asia/Tokyo")).date()).isoformat(),
+        "selected_snapshot_date": selected_snapshot_date,
         "available_snapshot_dates": available_dates,
         "source_url_count": len(source_urls),
     }
@@ -238,9 +273,7 @@ def main() -> int:
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     today = date.fromisoformat(args.today) if args.today else None
-    expected_snapshot_date = (
-        args.expected_source_snapshot_date or expected_monthly_snapshot_date(today)
-    )
+    expected_snapshot_date = args.expected_source_snapshot_date
     page_html = (
         args.html_file.read_text(encoding="utf-8")
         if args.html_file
@@ -253,14 +286,16 @@ def main() -> int:
         manifest,
         page_html=page_html,
         expected_snapshot_date=expected_snapshot_date,
+        as_of_date=today,
     )
+    source_snapshot_date = str(resolved["source_snapshot_date"])
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(resolved, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     summary = {
         "status": "ready",
         "source_id": resolved.get("source_id"),
-        "source_snapshot_date": expected_snapshot_date,
-        "run_label": run_label_for(expected_snapshot_date, args.run_label_suffix),
+        "source_snapshot_date": source_snapshot_date,
+        "run_label": run_label_for(source_snapshot_date, args.run_label_suffix),
         "source_manifest": str(args.out),
         "source_url_count": len(resolved["source_urls"]),
     }
@@ -314,7 +349,7 @@ def run_self_test() -> None:
     try:
         resolve_manifest(manifest, page_html=html_fixture, expected_snapshot_date="2026-07-01")
     except ValueError as exc:
-        assert "expected source snapshot 2026-07-01" in str(exc)
+        assert "requested source snapshot 2026-07-01" in str(exc)
     else:
         raise AssertionError("missing expected snapshot must fail closed")
 

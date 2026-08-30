@@ -37,12 +37,13 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("4,7,10,13,16,19,22,25,28 6,12", self.workflow)
         self.assertNotIn("3,10,17,24,31 1,7", self.workflow)
 
-    def test_workflow_derives_snapshot_date_and_run_label(self) -> None:
-        self.assertIn("expected_monthly_snapshot_date()", self.workflow)
+    def test_workflow_resolves_latest_available_snapshot_and_run_label(self) -> None:
+        self.assertNotIn("expected_monthly_snapshot_date()", self.workflow)
         self.assertNotIn("expected_semiannual_snapshot_date", self.workflow)
         self.assertIn("resolve_manifest(", self.workflow)
         self.assertIn('page_html=load_html(', self.workflow)
         self.assertIn('insecure_skip_tls_verify=insecure_skip_tls_verify == "true"', self.workflow)
+        self.assertIn('resolved_source_manifest["source_snapshot_date"]', self.workflow)
         self.assertIn("def run_label_suffix(resolved: dict[str, str]) -> str:", self.workflow)
         self.assertIn('resolved["run_label"] = run_label_for(', self.workflow)
         self.assertIn('"source_snapshot_date": source_snapshot_date', self.workflow)
