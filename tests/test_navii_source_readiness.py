@@ -10,6 +10,7 @@ from pathlib import Path
 from collectors.navii_detail.source_readiness import (
     SOURCE_SPECS,
     expected_monthly_snapshot_date,
+    latest_available_snapshot_date,
     resolve_manifest,
     run_label_for,
 )
@@ -75,8 +76,37 @@ class NaviiSourceReadinessTest(unittest.TestCase):
             [spec.kind for spec in SOURCE_SPECS],
         )
 
+    def test_resolve_manifest_selects_latest_available_snapshot(self) -> None:
+        resolved = resolve_manifest(
+            self.manifest,
+            page_html=HTML_FIXTURE,
+            as_of_date=date(2026, 8, 31),
+        )
+
+        self.assertEqual(resolved["source_snapshot_date"], "2026-08-01")
+        self.assertEqual(resolved["resolution"]["selection_mode"], "latest_available")
+        self.assertEqual(resolved["resolution"]["selected_snapshot_date"], "2026-08-01")
+        self.assertEqual(resolved["resolution"]["as_of_date"], "2026-08-31")
+        self.assertTrue(all("20260801" in source["url"] for source in resolved["source_urls"]))
+
+    def test_latest_available_snapshot_does_not_select_a_future_publication(self) -> None:
+        links = {"2026-06-01": {}, "2026-08-01": {}, "2026-09-01": {}}
+
+        self.assertEqual(
+            latest_available_snapshot_date(links, as_of_date=date(2026, 8, 31)),
+            "2026-08-01",
+        )
+
+    def test_no_snapshot_before_as_of_date_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no official source snapshot"):
+            resolve_manifest(
+                self.manifest,
+                page_html=HTML_FIXTURE,
+                as_of_date=date(2025, 1, 1),
+            )
+
     def test_missing_expected_snapshot_fails_closed(self) -> None:
-        with self.assertRaisesRegex(ValueError, "expected source snapshot 2026-07-01"):
+        with self.assertRaisesRegex(ValueError, "requested source snapshot 2026-07-01"):
             resolve_manifest(
                 self.manifest,
                 page_html=HTML_FIXTURE,

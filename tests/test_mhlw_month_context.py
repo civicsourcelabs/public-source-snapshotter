@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 
 
@@ -62,6 +63,41 @@ class MhlwMonthContextFilenameTest(unittest.TestCase):
                         basename=basename,
                         target_month="2026-08",
                     )
+
+    def test_latest_available_source_snapshot_uses_newest_public_month(self) -> None:
+        html = """
+        <html><body>
+          <p>令和8年8月1日現在</p>
+          <p>（2）エクセルファイル</p>
+          <a href="2608-06_01-01.zip">届出受理医療機関名簿（医科）［ZIP形式］</a>
+          <p>令和8年6月1日現在</p>
+          <a href="2606-06_10-01.zip">届出受理医療機関名簿（医科）［ZIP形式］</a>
+        </body></html>
+        """
+        row = self.source_row("medical")
+        args = type(
+            "Args",
+            (),
+            {
+                "timeout_seconds": 5,
+                "retry_count": 0,
+                "retry_backoff_seconds": 0,
+                "user_agent": COLLECTOR.DEFAULT_USER_AGENT,
+                "insecure_skip_tls_verify": False,
+            },
+        )()
+
+        original_request_text = COLLECTOR.request_text
+        try:
+            COLLECTOR.request_text = lambda _url, *, args: html
+            self.assertEqual(
+                COLLECTOR.latest_available_source_snapshot_date(
+                    [row], args=args, as_of_date=date(2026, 8, 31)
+                ),
+                "2026-08-01",
+            )
+        finally:
+            COLLECTOR.request_text = original_request_text
 
 
 if __name__ == "__main__":

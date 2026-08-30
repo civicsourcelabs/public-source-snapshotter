@@ -62,7 +62,7 @@ public-source-snapshotter/
 
 ## 実行の流れ
 
-1. `source-manifest.json` のsnapshot date / URLをownerが確認する
+1. `source-manifest.json` の公式URLと、実行時点以前の最新snapshotが解決できることをownerが確認する
 2. `summary_only` canaryを実行する
 3. `keys/owner-age-recipient.example.txt` を実際のage public recipient `keys/owner-age-recipient.txt` へ置き換える
 4. `encrypted_full` canaryを実行し、owner localでdecrypt / checksum確認する

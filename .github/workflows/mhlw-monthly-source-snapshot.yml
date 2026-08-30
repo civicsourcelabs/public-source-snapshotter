@@ -100,6 +100,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install collector dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check lxml openpyxl
+
       - name: Resolve effective inputs
         id: config
         env:
@@ -124,9 +133,17 @@ jobs:
           python3 - <<'PY'
           import json
           import os
-          from datetime import datetime
+          from argparse import Namespace
           from pathlib import Path
-          from zoneinfo import ZoneInfo
+
+          from collectors.mhlw_monthly.collect import (
+              DEFAULT_USER_AGENT,
+              csv_filter,
+              latest_available_source_snapshot_date,
+              load_manifest,
+              parse_source_rows,
+              select_rows,
+          )
 
           event_name = os.environ["EVENT_NAME"]
           default_manifest = "sources/mhlw_monthly/source-manifest.json"
@@ -141,10 +158,6 @@ jobs:
 
           def is_active_filter(raw: str) -> bool:
               return bool(raw.strip())
-
-          def target_month_start() -> str:
-              jst_now = datetime.now(ZoneInfo("Asia/Tokyo"))
-              return f"{jst_now:%Y-%m}-01"
 
           def run_label_for(resolved: dict[str, str]) -> str:
               yyyymm = resolved["source_snapshot_date"][:7].replace("-", "")
@@ -177,7 +190,7 @@ jobs:
                   "execute": "true",
                   "confirm": "owner-approved-public-source-snapshot",
                   "source_manifest": source_manifest,
-                  "source_snapshot_date": target_month_start(),
+                  "source_snapshot_date": "auto",
                   "artifact_mode": "encrypted_full",
                   "pipeline_slug": "",
                   "region": "",
@@ -191,13 +204,12 @@ jobs:
                   "insecure_skip_tls_verify": "false",
                   "artifact_retention_days": "7",
               }
-              resolved["run_label"] = run_label_for(resolved)
           else:
               resolved = {
                   "execute": value("EXECUTE", "false").lower(),
                   "confirm": value("CONFIRM", ""),
                   "source_manifest": value("SOURCE_MANIFEST", default_manifest),
-                  "source_snapshot_date": target_month_start(),
+                  "source_snapshot_date": "auto",
                   "artifact_mode": value("ARTIFACT_MODE", "summary_only"),
                   "pipeline_slug": value("PIPELINE_SLUG", ""),
                   "region": value("REGION", ""),
@@ -211,7 +223,27 @@ jobs:
                   "insecure_skip_tls_verify": value("INSECURE_SKIP_TLS_VERIFY", "false").lower(),
                   "artifact_retention_days": value("ARTIFACT_RETENTION_DAYS", "7"),
               }
-              resolved["run_label"] = run_label_for(resolved)
+          source_manifest_data = load_manifest(Path(resolved["source_manifest"]))
+          selected_rows = select_rows(
+              parse_source_rows(source_manifest_data),
+              pipeline_slugs=csv_filter(resolved["pipeline_slug"]),
+              regions=csv_filter(resolved["region"]),
+              source_types=csv_filter(resolved["source_type"]),
+              source_keys=set(),
+              max_sources=int(resolved["max_sources"]),
+          )
+          resolver_args = Namespace(
+              timeout_seconds=float(resolved["timeout_seconds"]),
+              retry_count=int(resolved["retry_count"]),
+              retry_backoff_seconds=float(resolved["retry_backoff_seconds"]),
+              user_agent=DEFAULT_USER_AGENT,
+              insecure_skip_tls_verify=resolved["insecure_skip_tls_verify"] == "true",
+          )
+          resolved["source_snapshot_date"] = latest_available_source_snapshot_date(
+              selected_rows,
+              args=resolver_args,
+          )
+          resolved["run_label"] = run_label_for(resolved)
 
           for key, resolved_value in resolved.items():
               emit(key, str(resolved_value))
@@ -238,15 +270,6 @@ jobs:
           if int(os.environ["MAX_SOURCES"]) < 0:
               raise SystemExit("max_sources must be >= 0")
           PY
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install collector dependencies
-        run: |
-          python3 -m pip install --disable-pip-version-check lxml openpyxl
 
       - name: Run collector
         env:

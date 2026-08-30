@@ -32,13 +32,16 @@ class MhlwWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("inputs.source_snapshot_date", self.workflow)
         self.assertNotIn("inputs.run_label", self.workflow)
 
-    def test_schedule_and_dispatch_derive_snapshot_date_and_run_label(self) -> None:
-        self.assertIn("def target_month_start() -> str:", self.workflow)
-        self.assertIn('return f"{jst_now:%Y-%m}-01"', self.workflow)
-        self.assertEqual(self.workflow.count('"source_snapshot_date": target_month_start()'), 2)
+    def test_schedule_and_dispatch_resolve_latest_snapshot_and_run_label(self) -> None:
+        self.assertEqual(self.workflow.count('"source_snapshot_date": "auto"'), 2)
+        self.assertIn("latest_available_source_snapshot_date(", self.workflow)
+        self.assertIn(
+            'resolved["source_snapshot_date"] = latest_available_source_snapshot_date(',
+            self.workflow,
+        )
 
         self.assertIn("def run_label_for(resolved: dict[str, str]) -> str:", self.workflow)
-        self.assertEqual(self.workflow.count('resolved["run_label"] = run_label_for(resolved)'), 2)
+        self.assertEqual(self.workflow.count('resolved["run_label"] = run_label_for(resolved)'), 1)
         self.assertIn('return f"collector-mhlw-monthly-{yyyymm}-{suffix}"', self.workflow)
 
     def test_scheduled_run_stays_full_encrypted_snapshot(self) -> None:

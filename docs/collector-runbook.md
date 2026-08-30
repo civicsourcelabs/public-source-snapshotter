@@ -20,9 +20,9 @@ MHLW monthly collectorとNavii detail collectorは、後続consumerが使う前�
 | `Source Snapshot: MHLW Monthly` | 毎月5日 07:00 JST / 毎月8日 07:00 JST | `execute=true`、`artifact_mode=encrypted_full`、`max_sources=0`、`source_manifest=sources/mhlw_monthly/source-manifest.json` |
 | `Source Snapshot: Navii Detail` | 毎月5日 00:30 JST | `execute=true`、`artifact_mode=encrypted_full`、`candidate_mode=all`、`shard_count=16`、`max_parallel=16`、`max_pages_per_shard=0`、`artifact_retention_days=14` |
 
-MHLW monthly runでは、schedule / manualともにAsia/Tokyoの実行月から `YYYY-MM-01` の `source_snapshot_date` とrun labelを自動生成します。後続consumerは最新成功full artifactを解決して使うため、public repo側の5日runが失敗した場合は8日runで再生成します。
+MHLW monthly runでは、schedule / manualともに公式ページで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しい共通snapshotを選び、`source_snapshot_date` とrun labelへ記録します。公開がまだ実行月に追いついていなくても、実行月を日付として仮定しません。後続consumerは選択済み日付をmanifestから引き継ぎます。public repo側の5日runが失敗した場合は8日runで同じ選択規則により再生成します。
 
-Navii detail runでは、Asia/Tokyoの実行月から `YYYY-MM-01` の期待snapshot dateを自動生成します。公式open data pageに該当snapshotと必須linkがなければfail closedし、利用可能な最新snapshotや前回snapshotへfallbackしません。run labelも `collector-navii-detail-YYYYMMDD-{canary|scope|full}` として自動生成します。scheduleは毎月5日にreadiness pollとして動きますが、同じsnapshot dateのfull artifactが既に成功していれば後続jobをskipします。
+Navii detail runでは、公式open data pageで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しいsnapshotを自動選択します。実行月のsnapshotが未公開でも、利用可能な最新snapshotを選び、その日付をmanifestとrun labelへ記録します。選択したsnapshotの必須linkやdetail取得が失敗した場合はfail closedし、選択後に別の古いsnapshotへfallbackしません。run labelも `collector-navii-detail-YYYYMMDD-{canary|scope|full}` として選択日付から生成します。scheduleは毎月5日にreadiness pollとして動きますが、同じsnapshot dateのfull artifactが既に成功していれば後続jobをskipします。
 
 ## 初回セットアップ
 
@@ -161,7 +161,7 @@ manual full runは、schedule失敗時の再生成、manifest更新直後の確�
 schedule runの期待値:
 
 - `Validate inputs` stepで `execute=true`、`artifact_mode=encrypted_full`、`shard_count=16`、`max_pages_per_shard=0` になっている
-- `Validate inputs` stepで公式open data pageから期待snapshot dateを解決し、`run_label=collector-navii-detail-YYYYMMDD-full` になっている
+- `Validate inputs` stepで公式open data pageから実行時点以前の最新snapshot dateを解決し、`run_label=collector-navii-detail-YYYYMMDD-full` になっている
 - `Package handoff artifact` stepで `encrypted/raw-artifacts-shard-*.tar.zst.age` だけがfull artifactとして含まれ、暗号化前の `*.tar.zst` やraw CSV / JSONL / HTMLが残らない
 - `Upload handoff package` のartifact名が `navii-detail-handoff-collector-navii-detail-YYYYMMDD-full-<github_run_id>` になる
 - consumer scheduleの前にrunが `success` で完了している
@@ -210,8 +210,8 @@ manual full runは、scheduleの補修、artifact再生成、manifest更新直�
 | --- | --- |
 | `execute` | `true` |
 | `confirm` | `owner-approved-public-source-snapshot` |
-| `source_snapshot_date` | 入力しない。Asia/Tokyoの実行月から自動生成 |
-| `run_label` | 入力しない。full条件では `collector-mhlw-monthly-YYYYMM-full` を自動生成 |
+| `source_snapshot_date` | 入力しない。公式ページから実行時点以前の最新snapshotを自動選択 |
+| `run_label` | 入力しない。選択したsnapshot dateから `collector-mhlw-monthly-YYYYMM-full` を自動生成 |
 | `artifact_mode` | `encrypted_full` |
 | `workers` | `2` |
 | `pause_seconds` | `0.5` |
@@ -227,7 +227,7 @@ manual full runは、scheduleの補修、artifact再生成、manifest更新直�
 
 schedule runの期待値:
 
-- `Resolve effective inputs` stepで `artifact_mode=encrypted_full`、`max_sources=0`、`run_label=collector-mhlw-monthly-YYYYMM-full` になっている
+- `Resolve effective inputs` stepで `artifact_mode=encrypted_full`、`max_sources=0`、公式ページから選択したsnapshot dateに対応する `run_label=collector-mhlw-monthly-YYYYMM-full` になっている
 - `Package artifact` stepで `encrypted/raw-mhlw-source-files.tar.zst.age` だけがupload packageへ入り、暗号化前の `*.tar.zst` は残らない
 - `Upload handoff package` のartifact名が `mhlw-monthly-handoff-collector-mhlw-monthly-YYYYMM-full-<github_run_id>` になる
 

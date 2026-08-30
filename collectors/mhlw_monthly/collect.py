@@ -25,9 +25,10 @@ import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 
 OWNER_CONFIRM = "owner-approved-public-source-snapshot"
@@ -140,7 +141,6 @@ def main() -> int:
         raise SystemExit("--manifest and --out-dir are required")
 
     manifest = load_manifest(args.manifest)
-    source_snapshot_date = args.source_snapshot_date or current_jst_month_start()
     source_id = args.source_id or str(manifest.get("source_id") or "mhlw_monthly")
 
     rows = select_rows(
@@ -153,6 +153,10 @@ def main() -> int:
     )
     if not rows:
         raise SystemExit("No source rows selected")
+    source_snapshot_date = args.source_snapshot_date.strip()
+    if not source_snapshot_date or source_snapshot_date == "auto":
+        source_snapshot_date = latest_available_source_snapshot_date(rows, args=args)
+        args.source_snapshot_date = source_snapshot_date
 
     out_dir = args.out_dir
     prepare_output_dirs(out_dir)
@@ -461,20 +465,7 @@ def resolve_month_context_href(
 
     target_month = parse_target_month(source_snapshot_date)
     tree = lxml_html.fromstring(html_text)
-    candidates = []
-    for anchor in tree.xpath("//a[@href]"):
-        text = normalize_space(anchor.text_content())
-        href = urllib.parse.urljoin(page_url, anchor.get("href"))
-        context_text = normalize_space(" ".join(str(part) for part in anchor.xpath("preceding::text()")))
-        candidates.append(
-            {
-                "snapshot_month": latest_reiwa_month(context_text),
-                "format": latest_source_format(context_text),
-                "text": text,
-                "href": href,
-                "basename": resolved_basename(href),
-            }
-        )
+    candidates = month_context_candidates(tree, page_url=page_url)
 
     source_title = SOURCE_TITLE_BY_TYPE[row.source_type]
     product_label = PRODUCT_LABEL_BY_SLUG[row.pipeline_slug]
@@ -532,6 +523,86 @@ def resolve_month_context_href(
             "candidates": selector_candidates,
         },
     )
+
+
+def month_context_candidates(tree: Any, *, page_url: str) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    for anchor in tree.xpath("//a[@href]"):
+        text = normalize_space(anchor.text_content())
+        href = urllib.parse.urljoin(page_url, anchor.get("href"))
+        context_text = normalize_space(" ".join(str(part) for part in anchor.xpath("preceding::text()")))
+        candidates.append(
+            {
+                "snapshot_month": latest_reiwa_month(context_text),
+                "format": latest_source_format(context_text),
+                "text": text,
+                "href": href,
+                "basename": resolved_basename(href),
+            }
+        )
+    return candidates
+
+
+def available_month_context_snapshots(
+    html_text: str,
+    *,
+    page_url: str,
+    row: SourceRow,
+) -> set[str]:
+    try:
+        from lxml import html as lxml_html
+    except ImportError as exc:
+        raise RuntimeError("month_context fetch_type requires lxml. Install lxml in the workflow.") from exc
+
+    tree = lxml_html.fromstring(html_text)
+    source_title = SOURCE_TITLE_BY_TYPE[row.source_type]
+    product_label = PRODUCT_LABEL_BY_SLUG[row.pipeline_slug]
+    return {
+        candidate["snapshot_month"]
+        for candidate in month_context_candidates(tree, page_url=page_url)
+        if candidate["snapshot_month"]
+        and candidate["format"] == "excel"
+        and source_title in candidate["text"]
+        and f"（{product_label}）" in candidate["text"]
+    }
+
+
+def latest_available_source_snapshot_date(
+    rows: Iterable[SourceRow],
+    *,
+    args: argparse.Namespace,
+    as_of_date: date | None = None,
+) -> str:
+    """Choose the newest common MHLW month-context snapshot available now."""
+    month_rows = [row for row in rows if row.fetch_type == "month_context"]
+    if not month_rows:
+        return current_jst_month_start()
+
+    available_by_source: list[set[str]] = []
+    seen_pages: set[tuple[str, str, str]] = set()
+    for row in month_rows:
+        key = (row.page_url, row.source_type, row.pipeline_slug)
+        if key in seen_pages:
+            continue
+        seen_pages.add(key)
+        available_by_source.append(
+            available_month_context_snapshots(
+                request_text(row.page_url, args=args),
+                page_url=row.page_url,
+                row=row,
+            )
+        )
+
+    common = set.intersection(*available_by_source) if available_by_source else set()
+    effective_as_of = as_of_date or datetime.now(ZoneInfo("Asia/Tokyo")).date()
+    eligible = sorted(month for month in common if month <= effective_as_of.strftime("%Y-%m"))
+    if not eligible:
+        available = ", ".join(sorted(common, reverse=True)) or "none"
+        raise RuntimeError(
+            "no common official MHLW snapshot was available by "
+            f"{effective_as_of.isoformat()}; available snapshots: {available}"
+        )
+    return f"{eligible[-1]}-01"
 
 
 def parse_target_month(source_snapshot_date: str) -> str:

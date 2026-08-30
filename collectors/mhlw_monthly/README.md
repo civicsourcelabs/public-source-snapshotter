@@ -49,4 +49,4 @@ python3 collectors/mhlw_monthly/collect.py \
 - 毎月5日 07:00 JST: private monthly processing前のfull artifact生成
 - 毎月8日 07:00 JST: 5日run失敗時のpublic artifact再生成
 
-schedule / manual runともに、Asia/Tokyoの実行月から `YYYY-MM-01` の `source_snapshot_date` を作ります。full条件では `collector-mhlw-monthly-YYYYMM-full` のrun labelで `encrypted_full` artifactを作ります。
+schedule / manual runともに、公式ページで確認できる対象sourceのうち、Asia/Tokyoの実行時点以前で最も新しい共通snapshotを選び、その `YYYY-MM-01` を `source_snapshot_date` として記録します。実行月に公開されていない場合も、実行月を仮定しません。full条件では選択した日付から `collector-mhlw-monthly-YYYYMM-full` のrun labelを作り、`encrypted_full` artifactを作ります。
