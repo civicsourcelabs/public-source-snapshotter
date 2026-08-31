@@ -307,7 +307,7 @@ jobs:
                   "sample_per_kind": "25",
                   "sample_strategy": "prefecture-stratified",
                   "shard_count": "16",
-                  "max_parallel": "4",
+                  "max_parallel": "16",
                   "workers": "2",
                   "pause_seconds": "0.3",
                   "jitter_seconds": "0.1",
@@ -372,8 +372,8 @@ jobs:
           workers = int(resolved["workers"])
           if max_parallel < 1 or workers < 1:
               raise SystemExit("max_parallel and workers must be >= 1")
-          if max_parallel * workers > 8:
-              raise SystemExit("aggregate Navii concurrency must be <= 8")
+          if max_parallel * workers > 32:
+              raise SystemExit("aggregate Navii concurrency must be <= 32")
           for threshold_name in ("fail_on_fetch_error_rate", "fail_on_parse_error_rate"):
               threshold = float(resolved[threshold_name])
               if not 0 <= threshold <= 100:

@@ -107,8 +107,8 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertIn("python3 -m pip install --disable-pip-version-check lxml", self.workflow)
         self.assertIn("collectors/navii_detail/quality_gate.py", self.workflow)
         self.assertIn("quality-status.json", self.workflow)
-        self.assertIn("aggregate Navii concurrency must be <= 8", self.workflow)
-        self.assertIn('"max_parallel": "4"', self.workflow)
+        self.assertIn("aggregate Navii concurrency must be <= 32", self.workflow)
+        self.assertIn('"max_parallel": "16"', self.workflow)
         self.assertIn("fail_on_parse_error_rate:", self.workflow)
 
 
