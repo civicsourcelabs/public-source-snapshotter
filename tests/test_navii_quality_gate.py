@@ -83,6 +83,19 @@ class NaviiQualityGateTest(unittest.TestCase):
         self.assertEqual(result["quality_status"], "fail")
         self.assertTrue(any("parse errors detected" in reason for reason in result["failure_reasons"]))
 
+    def test_preflight_uses_extraction_checks_without_fixed_sample_minimum(self) -> None:
+        result = evaluate_quality(
+            [shard_metrics()],
+            execute=True,
+            candidate_mode="preflight",
+            sample_per_kind=0,
+            kinds=KINDS,
+            fail_on_fetch_error_rate=5,
+        )
+
+        self.assertEqual(result["quality_status"], "pass")
+        self.assertEqual(result["gate"], "preflight")
+
     def test_dry_run_is_not_a_quality_pass(self) -> None:
         result = evaluate_quality(
             [],

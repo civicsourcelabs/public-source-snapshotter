@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metrics-dir", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--candidate-mode", choices=("all", "sample"), required=True)
+    parser.add_argument("--candidate-mode", choices=("all", "sample", "preflight"), required=True)
     parser.add_argument("--sample-per-kind", type=int, required=True)
     parser.add_argument("--kinds", required=True)
     parser.add_argument("--fail-on-fetch-error-rate", type=float, required=True)
@@ -87,7 +87,13 @@ def evaluate_quality(
     kinds: list[str],
     fail_on_fetch_error_rate: float,
 ) -> dict[str, Any]:
-    gate = "canary" if candidate_mode == "sample" else "full"
+    gate = (
+        "preflight"
+        if candidate_mode == "preflight"
+        else "canary"
+        if candidate_mode == "sample"
+        else "full"
+    )
     if not execute:
         return {
             "schema_version": "1.0",
@@ -199,7 +205,13 @@ def main() -> int:
         result = {
             "schema_version": "1.0",
             "quality_status": "fail",
-            "gate": "canary" if args.candidate_mode == "sample" else "full",
+            "gate": (
+                "preflight"
+                if args.candidate_mode == "preflight"
+                else "canary"
+                if args.candidate_mode == "sample"
+                else "full"
+            ),
             "failure_reasons": [str(exc)],
         }
     args.out.parent.mkdir(parents=True, exist_ok=True)

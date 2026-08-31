@@ -17,6 +17,7 @@ import gzip
 import hashlib
 import html
 import json
+import math
 import os
 import random
 import re
@@ -206,6 +207,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Candidate rows to take per Navii open-data kind.",
+    )
+    parser.add_argument(
+        "--sample-fraction",
+        type=float,
+        default=0.0,
+        help="Approximate fraction to take per kind when using sample mode. Zero keeps sample-per-kind behavior.",
     )
     parser.add_argument(
         "--sample-strategy",
@@ -487,6 +494,7 @@ def select_candidates(
     *,
     kinds: list[str],
     sample_per_kind: int,
+    sample_fraction: float,
     sample_strategy: str,
     navii_ids: set[str],
     all_candidates: bool,
@@ -509,10 +517,14 @@ def select_candidates(
 
     for kind in kinds:
         kind_rows = [row for row in rows if row.source_kind == kind and row.navii_id not in seen]
-        if sample_strategy == "prefecture-stratified":
-            sampled = stratified_by_prefecture(kind_rows, sample_per_kind)
+        if sample_fraction > 0:
+            sample_size = max(1, math.ceil(len(kind_rows) * sample_fraction)) if kind_rows else 0
         else:
-            sampled = kind_rows[:sample_per_kind]
+            sample_size = sample_per_kind
+        if sample_strategy == "prefecture-stratified":
+            sampled = stratified_by_prefecture(kind_rows, sample_size)
+        else:
+            sampled = kind_rows[:sample_size]
 
         for row in sampled:
             if row.navii_id in seen:
@@ -1724,6 +1736,8 @@ def main() -> int:
     invalid = sorted(set(kinds) - set(OPEN_DATA_FILE_TEMPLATES))
     if invalid:
         raise SystemExit(f"Unknown kind(s): {', '.join(invalid)}")
+    if not 0 <= args.sample_fraction <= 1:
+        raise SystemExit("--sample-fraction must be between 0 and 1")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1736,6 +1750,7 @@ def main() -> int:
         all_rows,
         kinds=kinds,
         sample_per_kind=args.sample_per_kind,
+        sample_fraction=args.sample_fraction,
         sample_strategy=args.sample_strategy,
         navii_ids=set(args.navii_id),
         all_candidates=args.all_candidates,
@@ -1783,6 +1798,9 @@ def main() -> int:
             "selected_candidate_count": len(selected_candidates),
             "shard_candidate_count": len(shard_candidates),
             "candidate_count": len(candidates),
+            "available_candidate_count": len(all_rows),
+            "available_candidate_counts": dict(Counter(row.source_kind for row in all_rows)),
+            "sample_fraction": args.sample_fraction,
             "shard_index": args.shard_index,
             "shard_count": args.shard_count,
             "workers": args.workers,
@@ -2100,6 +2118,12 @@ def main() -> int:
         "selected_candidate_count": len(selected_candidates),
         "shard_candidate_count": len(shard_candidates),
         "candidate_count": len(candidates),
+        "available_candidate_count": len(all_rows),
+        "available_candidate_counts": dict(Counter(row.source_kind for row in all_rows)),
+        "sample_fraction": args.sample_fraction,
+        "selected_candidate_fraction": (
+            len(selected_candidates) / len(all_rows) if all_rows else 0.0
+        ),
         "pending_candidate_count": len(pending_candidates),
         "resumed_candidate_count": len(completed_ids),
         "output_candidate_count": len(completed_ids) + total_fetch_count,

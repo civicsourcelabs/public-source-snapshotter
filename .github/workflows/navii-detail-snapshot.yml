@@ -128,6 +128,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  NAVII_PREFLIGHT_FRACTION: "0.001"
 
 concurrency:
   group: navii-detail-snapshot-${{ github.ref }}
@@ -460,17 +461,22 @@ jobs:
           path: ${{ runner.temp }}/source-open-data/
           retention-days: ${{ fromJSON(needs.validate.outputs.artifact_retention_days) }}
 
-  preflight-canary:
-    name: "Preflight canary"
+  preflight:
+    name: "Preflight shard ${{ matrix.shard_index }}"
     needs:
       - validate
       - prepare-source
     if: needs.validate.outputs.skip_existing != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
+    strategy:
+      fail-fast: true
+      max-parallel: ${{ fromJSON(needs.validate.outputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
     env:
       SOURCE_DIR: /tmp/source-open-data
-      OUT_DIR: /tmp/navii-detail-preflight
+      OUT_DIR: /tmp/navii-detail-preflight-output
+      SHARD_INDEX: ${{ matrix.shard_index }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -489,13 +495,17 @@ jobs:
           name: source-open-data-${{ github.run_id }}
           path: ${{ env.SOURCE_DIR }}
 
-      - name: Run preflight canary
+      - name: Run preflight collector
         env:
           EXECUTE: ${{ needs.validate.outputs.execute }}
-          RUN_LABEL: ${{ needs.validate.outputs.run_label }}
+          RUN_LABEL: ${{ needs.validate.outputs.run_label }}-preflight
           SOURCE_ID: ${{ needs.validate.outputs.source_id }}
           SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
+          ARTIFACT_MODE: ${{ needs.validate.outputs.artifact_mode }}
           KINDS: ${{ needs.validate.outputs.kinds }}
+          SAMPLE_STRATEGY: ${{ needs.validate.outputs.sample_strategy }}
+          SHARD_COUNT: ${{ needs.validate.outputs.shard_count }}
+          MAX_PAGES_PER_SHARD: ${{ needs.validate.outputs.max_pages_per_shard }}
           WORKERS: ${{ needs.validate.outputs.workers }}
           PAUSE_SECONDS: ${{ needs.validate.outputs.pause_seconds }}
           JITTER_SECONDS: ${{ needs.validate.outputs.jitter_seconds }}
@@ -505,6 +515,7 @@ jobs:
           INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
           FAIL_ON_PARSE_ERROR_RATE: ${{ needs.validate.outputs.fail_on_parse_error_rate }}
+          PREFLIGHT_FRACTION: ${{ env.NAVII_PREFLIGHT_FRACTION }}
         run: |
           set -euo pipefail
           mkdir -p "$OUT_DIR"
@@ -514,14 +525,15 @@ jobs:
             --source-id "$SOURCE_ID"
             --source-snapshot-date "$SOURCE_SNAPSHOT_DATE"
             --run-label "$RUN_LABEL"
-            --artifact-mode summary_only
+            --artifact-mode "$ARTIFACT_MODE"
             --kinds "$KINDS"
-            --sample-per-kind 25
-            --sample-strategy prefecture-stratified
+            --sample-per-kind 0
+            --sample-fraction "$PREFLIGHT_FRACTION"
+            --sample-strategy "$SAMPLE_STRATEGY"
             --sample-candidates
-            --shard-count 1
-            --shard-index 0
-            --max-pages-per-shard 0
+            --shard-count "$SHARD_COUNT"
+            --shard-index "$SHARD_INDEX"
+            --max-pages-per-shard "$MAX_PAGES_PER_SHARD"
             --workers "$WORKERS"
             --pause-seconds "$PAUSE_SECONDS"
             --jitter-seconds "$JITTER_SECONDS"
@@ -540,56 +552,270 @@ jobs:
           fi
           python3 collectors/navii_detail/collect.py "${args[@]}"
 
-          if [ "$EXECUTE" = "true" ]; then
-            quality_args=(
-              --metrics-dir "$OUT_DIR"
-              --out "$OUT_DIR/quality-status.json"
-              --execute
-              --candidate-mode sample
-              --sample-per-kind 25
-              --kinds "$KINDS"
-              --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
-            )
-            python3 collectors/navii_detail/quality_gate.py "${quality_args[@]}"
-          fi
-
-      - name: Publish preflight summary
+      - name: Package preflight audit shard
         if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          SHARD_COUNT: ${{ needs.validate.outputs.shard_count }}
+          AUDIT_PACKAGE_DIR: /tmp/navii-detail-preflight-package
+          PREFLIGHT_FRACTION: ${{ env.NAVII_PREFLIGHT_FRACTION }}
         run: |
           set -euo pipefail
-          if [ ! -f "$OUT_DIR/run-metrics.json" ]; then
-            echo "Preflight metrics were not produced." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          rm -rf "$AUDIT_PACKAGE_DIR"
+          mkdir -p "$OUT_DIR" "$AUDIT_PACKAGE_DIR/metrics" "$AUDIT_PACKAGE_DIR/encrypted" "$AUDIT_PACKAGE_DIR/checksums"
+          if [ -f "$OUT_DIR/run-metrics.json" ]; then
+            cp "$OUT_DIR/run-metrics.json" "$AUDIT_PACKAGE_DIR/metrics/run-metrics.json"
+          fi
+          if [ -f "$OUT_DIR/coverage-summary.csv.gz" ]; then
+            cp "$OUT_DIR/coverage-summary.csv.gz" "$AUDIT_PACKAGE_DIR/metrics/coverage-summary.csv.gz"
           fi
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          metrics = json.loads((Path(os.environ["OUT_DIR"]) / "run-metrics.json").read_text(encoding="utf-8"))
-          summary = {
-              "quality_status": metrics.get("quality_status"),
-              "candidate_count": metrics.get("candidate_count"),
-              "fetch_ok_count": metrics.get("fetch_ok_count"),
-              "fetch_error_count": metrics.get("fetch_error_count"),
-              "parse_ok_count": metrics.get("parse_ok_count"),
-              "parse_error_count": metrics.get("parse_error_count"),
-              "early_failure_reason": metrics.get("early_failure_reason", ""),
+          metrics_path = Path(os.environ["OUT_DIR"]) / "run-metrics.json"
+          metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.exists() else {}
+          metadata = {
+              "schema_version": "1.0",
+              "audit_only": True,
+              "full_run_consumes_preflight": False,
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "shard_index": int(os.environ["SHARD_INDEX"]),
+              "shard_count": int(os.environ["SHARD_COUNT"]),
+              "candidate_fraction": float(os.environ["PREFLIGHT_FRACTION"]),
+              "job_status": os.environ.get("JOB_STATUS", "unknown"),
+              "quality_status": metrics.get("quality_status", "not_produced"),
           }
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
-              handle.write("### Navii preflight canary\n\n")
-              handle.write("```json\n")
-              handle.write(json.dumps(summary, ensure_ascii=False, indent=2))
-              handle.write("\n```\n")
+          package_dir = Path(os.environ["AUDIT_PACKAGE_DIR"])
+          (package_dir / "metrics" / "preflight-metadata.json").write_text(
+              json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
           PY
 
+          # Keep the audit copy encrypted even when the final handoff is
+          # summary_only. The full run never downloads this artifact.
+          test -s keys/owner-age-recipient.txt
+          sudo apt-get update
+          sudo apt-get install -y age zstd
+          tar --zstd -cf "$AUDIT_PACKAGE_DIR/encrypted/preflight-raw-shard-${SHARD_INDEX}.tar.zst" \
+            -C "$OUT_DIR" .
+          age -R keys/owner-age-recipient.txt \
+            -o "$AUDIT_PACKAGE_DIR/encrypted/preflight-raw-shard-${SHARD_INDEX}.tar.zst.age" \
+            "$AUDIT_PACKAGE_DIR/encrypted/preflight-raw-shard-${SHARD_INDEX}.tar.zst"
+          rm "$AUDIT_PACKAGE_DIR/encrypted/preflight-raw-shard-${SHARD_INDEX}.tar.zst"
+          (cd "$AUDIT_PACKAGE_DIR" && find . -type f -not -path './checksums/SHA256SUMS' -print0 | sort -z | xargs -0 shasum -a 256 > checksums/SHA256SUMS)
+
+      - name: Upload preflight audit shard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: navii-detail-preflight-shard-${{ matrix.shard_index }}-${{ github.run_id }}
+          path: /tmp/navii-detail-preflight-package/
+          if-no-files-found: ignore
+          retention-days: ${{ fromJSON(needs.validate.outputs.artifact_retention_days) }}
+
+  preflight-audit:
+    name: "Verify and retain preflight audit"
+    needs:
+      - validate
+      - preflight
+    if: always() && needs.validate.outputs.skip_existing != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      INPUT_DIR: ${{ runner.temp }}/preflight-shards
+      AUDIT_DIR: ${{ runner.temp }}/preflight-audit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download preflight audit shards
+        uses: actions/download-artifact@v8
+        with:
+          pattern: navii-detail-preflight-shard-*-${{ github.run_id }}
+          path: ${{ env.INPUT_DIR }}
+          merge-multiple: false
+
+      - name: Verify preflight quality and build audit artifact
+        env:
+          EXECUTE: ${{ needs.validate.outputs.execute }}
+          RUN_LABEL: ${{ needs.validate.outputs.run_label }}
+          SOURCE_ID: ${{ needs.validate.outputs.source_id }}
+          SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
+          ARTIFACT_MODE: ${{ needs.validate.outputs.artifact_mode }}
+          KINDS: ${{ needs.validate.outputs.kinds }}
+          CANDIDATE_MODE: ${{ needs.validate.outputs.candidate_mode }}
+          SAMPLE_PER_KIND: ${{ needs.validate.outputs.sample_per_kind }}
+          SAMPLE_STRATEGY: ${{ needs.validate.outputs.sample_strategy }}
+          SHARD_COUNT: ${{ needs.validate.outputs.shard_count }}
+          SHARD_MATRIX: ${{ needs.validate.outputs.matrix }}
+          MAX_PARALLEL: ${{ needs.validate.outputs.max_parallel }}
+          WORKERS: ${{ needs.validate.outputs.workers }}
+          PAUSE_SECONDS: ${{ needs.validate.outputs.pause_seconds }}
+          JITTER_SECONDS: ${{ needs.validate.outputs.jitter_seconds }}
+          TIMEOUT_SECONDS: ${{ needs.validate.outputs.timeout_seconds }}
+          RETRY_COUNT: ${{ needs.validate.outputs.retry_count }}
+          RETRY_BACKOFF_SECONDS: ${{ needs.validate.outputs.retry_backoff_seconds }}
+          MAX_PAGES_PER_SHARD: ${{ needs.validate.outputs.max_pages_per_shard }}
+          INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
+          FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
+          FAIL_ON_PARSE_ERROR_RATE: ${{ needs.validate.outputs.fail_on_parse_error_rate }}
+          PREFLIGHT_FRACTION: ${{ env.NAVII_PREFLIGHT_FRACTION }}
+        run: |
+          set -euo pipefail
+          rm -rf "$AUDIT_DIR"
+          mkdir -p "$AUDIT_DIR/metrics" "$AUDIT_DIR/manifest" "$AUDIT_DIR/shards" "$AUDIT_DIR/checksums"
+          find "$INPUT_DIR" -path '*/metrics/run-metrics.json' -print0 | while IFS= read -r -d '' file; do
+            shard_name="$(basename "$(dirname "$(dirname "$file")")")"
+            cp "$file" "$AUDIT_DIR/metrics/${shard_name}-run-metrics.json"
+          done
+          find "$INPUT_DIR" -path '*/metrics/coverage-summary.csv.gz' -print0 | while IFS= read -r -d '' file; do
+            shard_name="$(basename "$(dirname "$(dirname "$file")")")"
+            cp "$file" "$AUDIT_DIR/metrics/${shard_name}-coverage-summary.csv.gz"
+          done
+          cp -R "$INPUT_DIR" "$AUDIT_DIR/shards/downloaded"
+
+          quality_args=(
+            --metrics-dir "$AUDIT_DIR/metrics"
+            --out "$AUDIT_DIR/metrics/quality-status.json"
+            --candidate-mode preflight
+            --sample-per-kind 0
+            --kinds "$KINDS"
+            --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
+          )
+          if [ "$EXECUTE" = "true" ]; then
+            quality_args+=(--execute)
+          fi
+          set +e
+          python3 collectors/navii_detail/quality_gate.py "${quality_args[@]}"
+          quality_gate_exit=$?
+          set -e
+
+          set +e
+          QUALITY_GATE_EXIT="$quality_gate_exit" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          audit_dir = Path(os.environ["AUDIT_DIR"])
+          metrics_paths = sorted((audit_dir / "metrics").glob("*-run-metrics.json"))
+          metrics = [json.loads(path.read_text(encoding="utf-8")) for path in metrics_paths]
+          expected_shards = int(os.environ["SHARD_COUNT"])
+          expected_indexes = sorted(
+              int(item["shard_index"])
+              for item in json.loads(os.environ["SHARD_MATRIX"])["include"]
+          )
+          indexes = sorted(int(row["shard_index"]) for row in metrics)
+          structural_failures = []
+          if len(metrics) != len(expected_indexes) or indexes != expected_indexes:
+              structural_failures.append(
+                  f"missing shard metrics: expected {expected_indexes}, got {indexes}"
+              )
+          expected_fraction = float(os.environ["PREFLIGHT_FRACTION"])
+          if any(float(row.get("sample_fraction") or 0) != expected_fraction for row in metrics):
+              structural_failures.append(f"sample fraction must be exactly {expected_fraction}")
+          if any(int(row.get("shard_count") or 0) != expected_shards for row in metrics):
+              structural_failures.append("shard metrics disagree on shard_count")
+          available_counts = {int(row.get("available_candidate_count") or 0) for row in metrics}
+          available_count = next(iter(available_counts), 0) if len(available_counts) == 1 else 0
+          if len(available_counts) != 1 or not available_count:
+              structural_failures.append("metrics do not share a non-zero full candidate count")
+          selected_count = sum(int(row.get("shard_candidate_count") or 0) for row in metrics)
+          selected_fraction = selected_count / available_count if available_count else 0.0
+          if selected_count <= 0 or selected_fraction > 0.01:
+              structural_failures.append(
+                  f"candidate volume is invalid: {selected_count}/{available_count} ({selected_fraction:.4%})"
+              )
+          quality_status = "not_produced"
+          quality_status_path = audit_dir / "metrics" / "quality-status.json"
+          if quality_status_path.exists():
+              quality_status = json.loads(quality_status_path.read_text(encoding="utf-8")).get(
+                  "quality_status", "unknown"
+              )
+          manifest = {
+              "schema_version": "1.0",
+              "audit_only": True,
+              "full_run_consumes_preflight": False,
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "full_run_settings": {
+                  "execute": os.environ["EXECUTE"] == "true",
+                  "run_label": os.environ["RUN_LABEL"],
+                  "artifact_mode": os.environ["ARTIFACT_MODE"],
+                  "source_id": os.environ["SOURCE_ID"],
+                  "source_snapshot_date": os.environ["SOURCE_SNAPSHOT_DATE"],
+                  "kinds": os.environ["KINDS"].split(","),
+                  "candidate_mode": os.environ["CANDIDATE_MODE"],
+                  "sample_per_kind": int(os.environ["SAMPLE_PER_KIND"]),
+                  "sample_strategy": os.environ["SAMPLE_STRATEGY"],
+                  "insecure_skip_tls_verify": os.environ["INSECURE_SKIP_TLS_VERIFY"] == "true",
+              },
+              "preflight_overrides": {
+                  "candidate_mode": "sample",
+                  "sample_per_kind": 0,
+                  "sample_fraction": expected_fraction,
+                  "run_label_suffix": "-preflight",
+                  "full_run_consumes_preflight": False,
+              },
+              "source_id": os.environ["SOURCE_ID"],
+              "source_snapshot_date": os.environ["SOURCE_SNAPSHOT_DATE"],
+              "candidate_fraction": expected_fraction,
+              "available_candidate_count": available_count,
+              "preflight_candidate_count": selected_count,
+              "preflight_candidate_fraction_actual": selected_fraction,
+              "quality_status": quality_status,
+              "quality_gate_exit": int(os.environ.get("QUALITY_GATE_EXIT", "1")),
+              "structural_failures": structural_failures,
+              "kinds": os.environ["KINDS"].split(","),
+              "shards": {
+                  "shard_count": expected_shards,
+                  "shard_indexes": expected_indexes,
+                  "max_parallel": int(os.environ["MAX_PARALLEL"]),
+                  "workers": int(os.environ["WORKERS"]),
+              },
+              "fetch_settings": {
+                  "pause_seconds": float(os.environ["PAUSE_SECONDS"]),
+                  "jitter_seconds": float(os.environ["JITTER_SECONDS"]),
+                  "timeout_seconds": float(os.environ["TIMEOUT_SECONDS"]),
+                  "retry_count": int(os.environ["RETRY_COUNT"]),
+                  "retry_backoff_seconds": float(os.environ["RETRY_BACKOFF_SECONDS"]),
+                  "max_pages_per_shard": int(os.environ["MAX_PAGES_PER_SHARD"]),
+                  "fail_on_fetch_error_rate": float(os.environ["FAIL_ON_FETCH_ERROR_RATE"]),
+                  "fail_on_parse_error_rate": float(os.environ["FAIL_ON_PARSE_ERROR_RATE"]),
+              },
+              "full_run_input": "source-open-data plus the same resolved workflow settings; preflight output is not an input",
+          }
+          (audit_dir / "manifest" / "preflight-audit-manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          if int(os.environ.get("QUALITY_GATE_EXIT", "1")) != 0 or structural_failures:
+              print(json.dumps({"structural_failures": structural_failures}, ensure_ascii=False))
+              raise SystemExit(2)
+          PY
+          validation_exit=$?
+          set -e
+          (cd "$AUDIT_DIR" && find . -type f -not -path './checksums/SHA256SUMS' -print0 | sort -z | xargs -0 shasum -a 256 > checksums/SHA256SUMS)
+          if [ "$quality_gate_exit" -ne 0 ] || [ "$validation_exit" -ne 0 ]; then
+            exit 2
+          fi
+
+      - name: Upload preflight audit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: navii-detail-preflight-audit-${{ github.run_id }}
+          path: ${{ env.AUDIT_DIR }}/
+          retention-days: ${{ fromJSON(needs.validate.outputs.artifact_retention_days) }}
+
   collect:
-    name: "Collect shard ${{ matrix.shard_index }}"
+    name: "Collect full shard ${{ matrix.shard_index }}"
     needs:
       - validate
       - prepare-source
-      - preflight-canary
-    if: needs.validate.outputs.skip_existing != 'true'
+      - preflight-audit
+    if: needs.validate.outputs.skip_existing != 'true' && needs.preflight-audit.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -725,7 +951,7 @@ jobs:
     needs:
       - validate
       - collect
-    if: needs.validate.outputs.skip_existing != 'true'
+    if: needs.validate.outputs.skip_existing != 'true' && needs.collect.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

@@ -13,6 +13,7 @@ from collectors.navii_detail.collect import (
     analyze_detail_result,
     parse_navii_id,
     retry_delay_seconds,
+    select_candidates,
     validate_detail_response,
 )
 
@@ -55,6 +56,39 @@ LEGACY_DOM = """
 
 
 class NaviiDetailParserTest(unittest.TestCase):
+    def test_sample_fraction_selects_deterministic_rows_per_kind(self) -> None:
+        rows = [
+            NaviiCandidate(
+                source_kind=kind,
+                product_slug=kind,
+                navii_id=f"{kind}-{index}",
+                pref_cd=f"{index % 47 + 1:02d}",
+                kikan_kbn="1",
+                kikan_cd=f"{index:09d}",
+                name=f"{kind}-{index}",
+                address="",
+                detail_url="https://example.test/detail",
+            )
+            for kind in ("hospital", "pharmacy")
+            for index in range(100)
+        ]
+
+        selected = select_candidates(
+            rows,
+            kinds=["hospital", "pharmacy"],
+            sample_per_kind=25,
+            sample_fraction=0.1,
+            sample_strategy="first",
+            navii_ids=set(),
+            all_candidates=False,
+        )
+
+        self.assertEqual(len(selected), 20)
+        self.assertEqual(
+            {kind: sum(row.source_kind == kind for row in selected) for kind in ("hospital", "pharmacy")},
+            {"hospital": 10, "pharmacy": 10},
+        )
+
     def test_navii_id_parser_preserves_alphanumeric_facility_suffix(self) -> None:
         self.assertEqual(parse_navii_id("37537X5122198"), ("37", "5", "37X5122198"))
         self.assertEqual(parse_navii_id("375L370100040"), ("37", "5", "L370100040"))
