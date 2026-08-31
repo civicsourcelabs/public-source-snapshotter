@@ -111,6 +111,11 @@ on:
         type: string
         required: true
         default: "5"
+      fail_on_parse_error_rate:
+        description: "Fail when parse error rate exceeds this percent"
+        type: string
+        required: true
+        default: "0"
       artifact_retention_days:
         description: "GitHub artifact retention days"
         type: string
@@ -157,6 +162,7 @@ jobs:
       insecure_skip_tls_verify: ${{ steps.plan.outputs.insecure_skip_tls_verify }}
       max_pages_per_shard: ${{ steps.plan.outputs.max_pages_per_shard }}
       fail_on_fetch_error_rate: ${{ steps.plan.outputs.fail_on_fetch_error_rate }}
+      fail_on_parse_error_rate: ${{ steps.plan.outputs.fail_on_parse_error_rate }}
       artifact_retention_days: ${{ steps.plan.outputs.artifact_retention_days }}
     steps:
       - name: Checkout
@@ -186,6 +192,7 @@ jobs:
           INSECURE_SKIP_TLS_VERIFY: ${{ inputs.insecure_skip_tls_verify }}
           MAX_PAGES_PER_SHARD: ${{ inputs.max_pages_per_shard }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ inputs.fail_on_fetch_error_rate }}
+          FAIL_ON_PARSE_ERROR_RATE: ${{ inputs.fail_on_parse_error_rate }}
           ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -214,7 +221,10 @@ jobs:
           def successful_artifact_exists(run_label: str) -> bool:
               token = os.environ.get("GITHUB_TOKEN", "")
               repo = os.environ.get("GITHUB_REPOSITORY", "")
+              current_sha = os.environ.get("GITHUB_SHA", "")
               if not token or not repo:
+                  return False
+              if not current_sha:
                   return False
               api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
               prefix = f"navii-detail-handoff-{run_label}-"
@@ -233,7 +243,19 @@ jobs:
                   artifacts = payload.get("artifacts") or []
                   for artifact in artifacts:
                       name = str(artifact.get("name") or "")
-                      if not artifact.get("expired") and name.startswith(prefix):
+                      if artifact.get("expired") or not name.startswith(prefix):
+                          continue
+                      workflow_run = artifact.get("workflow_run") or {}
+                      run_id = workflow_run.get("id")
+                      if not run_id:
+                          continue
+                      run_request = urllib.request.Request(
+                          f"{api_url}/repos/{repo}/actions/runs/{run_id}",
+                          headers=headers,
+                      )
+                      with urllib.request.urlopen(run_request, timeout=30) as run_response:
+                          run_payload = json.loads(run_response.read().decode("utf-8"))
+                      if run_payload.get("head_sha") == current_sha:
                           return True
                   if len(artifacts) < 100:
                       break
@@ -285,7 +307,7 @@ jobs:
                   "sample_per_kind": "25",
                   "sample_strategy": "prefecture-stratified",
                   "shard_count": "16",
-                  "max_parallel": "16",
+                  "max_parallel": "4",
                   "workers": "2",
                   "pause_seconds": "0.3",
                   "jitter_seconds": "0.1",
@@ -295,6 +317,7 @@ jobs:
                   "insecure_skip_tls_verify": insecure_skip_tls_verify,
                   "max_pages_per_shard": "0",
                   "fail_on_fetch_error_rate": "5",
+                  "fail_on_parse_error_rate": "0",
                   "artifact_retention_days": "14",
               }
               raw_indexes = ""
@@ -320,6 +343,7 @@ jobs:
                   "insecure_skip_tls_verify": insecure_skip_tls_verify,
                   "max_pages_per_shard": value("MAX_PAGES_PER_SHARD", "400"),
                   "fail_on_fetch_error_rate": value("FAIL_ON_FETCH_ERROR_RATE", "5"),
+                  "fail_on_parse_error_rate": value("FAIL_ON_PARSE_ERROR_RATE", "0"),
                   "artifact_retention_days": value("ARTIFACT_RETENTION_DAYS", "7"),
               }
               raw_indexes = os.environ.get("SHARD_INDEXES", "").strip()
@@ -343,6 +367,17 @@ jobs:
               raise SystemExit(f"invalid sample_strategy: {resolved['sample_strategy']}")
           if int(resolved["sample_per_kind"]) < 0:
               raise SystemExit("sample_per_kind must be >= 0")
+
+          max_parallel = int(resolved["max_parallel"])
+          workers = int(resolved["workers"])
+          if max_parallel < 1 or workers < 1:
+              raise SystemExit("max_parallel and workers must be >= 1")
+          if max_parallel * workers > 8:
+              raise SystemExit("aggregate Navii concurrency must be <= 8")
+          for threshold_name in ("fail_on_fetch_error_rate", "fail_on_parse_error_rate"):
+              threshold = float(resolved[threshold_name])
+              if not 0 <= threshold <= 100:
+                  raise SystemExit(f"{threshold_name} must be between 0 and 100")
 
           shard_count = int(resolved["shard_count"])
           if shard_count < 1:
@@ -450,6 +485,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install Navii collector dependencies
+        run: python3 -m pip install --disable-pip-version-check lxml
+
       - name: Download source artifact
         uses: actions/download-artifact@v8
         with:
@@ -477,6 +515,7 @@ jobs:
           RETRY_BACKOFF_SECONDS: ${{ needs.validate.outputs.retry_backoff_seconds }}
           INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
+          FAIL_ON_PARSE_ERROR_RATE: ${{ needs.validate.outputs.fail_on_parse_error_rate }}
         run: |
           set -euo pipefail
           mkdir -p "$OUT_DIR"
@@ -500,6 +539,7 @@ jobs:
             --retry-count "$RETRY_COUNT"
             --retry-backoff-seconds "$RETRY_BACKOFF_SECONDS"
             --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
+            --fail-on-parse-error-rate "$FAIL_ON_PARSE_ERROR_RATE"
           )
           if [ "$EXECUTE" = "true" ]; then
             args+=(--execute)
@@ -576,6 +616,7 @@ jobs:
 
       - name: Build manifest and package
         env:
+          EXECUTE: ${{ needs.validate.outputs.execute }}
           RUN_LABEL: ${{ needs.validate.outputs.run_label }}
           SOURCE_ID: ${{ needs.validate.outputs.source_id }}
           SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
@@ -586,6 +627,8 @@ jobs:
           SHARD_COUNT: ${{ needs.validate.outputs.shard_count }}
           MAX_PARALLEL: ${{ needs.validate.outputs.max_parallel }}
           WORKERS: ${{ needs.validate.outputs.workers }}
+          KINDS: ${{ needs.validate.outputs.kinds }}
+          FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
           PACKAGE_DIR: ${{ runner.temp }}/package
           SOURCE_MANIFEST_TEMPLATE: sources/navii/source-manifest.json
           INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
@@ -644,6 +687,20 @@ jobs:
           while IFS= read -r -d '' file; do
             cp "$file" "$PACKAGE_DIR/encrypted/$(basename "$file")"
           done < <(find "$PACKAGE_DIR/shard-packages" -path '*/encrypted/*' -type f -print0 | sort -z)
+
+          quality_args=(
+            --metrics-dir "$PACKAGE_DIR/metrics"
+            --out "$PACKAGE_DIR/metrics/quality-status.json"
+            --candidate-mode "$CANDIDATE_MODE"
+            --sample-per-kind "$SAMPLE_PER_KIND"
+            --kinds "$KINDS"
+            --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
+          )
+          if [ "$EXECUTE" = "true" ]; then
+            quality_args+=(--execute)
+          fi
+          python3 collectors/navii_detail/quality_gate.py "${quality_args[@]}"
+
           rm -rf "$PACKAGE_DIR/shard-packages"
 
           python3 - <<'PY'
