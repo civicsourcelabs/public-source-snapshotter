@@ -28,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-per-kind", type=int, required=True)
     parser.add_argument("--kinds", required=True)
     parser.add_argument("--fail-on-fetch-error-rate", type=float, required=True)
+    parser.add_argument(
+        "--fail-on-unresolved-rate",
+        type=float,
+        required=True,
+        help="Fail when unresolved Navii detail candidates exceed this percent.",
+    )
     return parser.parse_args()
 
 
@@ -53,6 +59,10 @@ def aggregate_metrics(payloads: Iterable[dict[str, Any]]) -> tuple[Counter[str],
             "table_rows",
             "link_rows",
             "phone_number_rows",
+            "override_hit_count",
+            "derived_hit_count",
+            "search_resolved_count",
+            "unresolved_count",
         ):
             totals[key] += int_value(payload, key)
         for kind, values in (payload.get("kind_metrics") or {}).items():
@@ -70,6 +80,12 @@ def aggregate_metrics(payloads: Iterable[dict[str, Any]]) -> tuple[Counter[str],
                 "phone_number_row_count",
                 "unknown_count",
                 "fallback_count",
+                "resolution_override_hit_count",
+                "resolution_derived_hit_count",
+                "resolution_search_resolved_count",
+                "resolution_unresolved_count",
+                "resolution_parse_error_count",
+                "resolution_fetch_error_count",
             ):
                 by_kind[kind][key] += int_value(values, key)
             for fingerprint in values.get("structure_fingerprints") or []:
@@ -86,6 +102,7 @@ def evaluate_quality(
     sample_per_kind: int,
     kinds: list[str],
     fail_on_fetch_error_rate: float,
+    fail_on_unresolved_rate: float = 1.0,
 ) -> dict[str, Any]:
     gate = (
         "preflight"
@@ -121,9 +138,18 @@ def evaluate_quality(
         if parse_denominator
         else 0.0
     )
+    unresolved_rate = (
+        totals["unresolved_count"] / totals["candidate_count"] * 100
+        if totals["candidate_count"]
+        else 0.0
+    )
     if fetch_error_rate > fail_on_fetch_error_rate:
         failures.append(
             f"aggregate fetch error rate {fetch_error_rate:.2f}% exceeded {fail_on_fetch_error_rate:.2f}%"
+        )
+    if unresolved_rate > fail_on_unresolved_rate:
+        failures.append(
+            f"aggregate unresolved rate {unresolved_rate:.2f}% exceeded {fail_on_unresolved_rate:.2f}%"
         )
     if totals["parse_error_count"] > 0:
         failures.append(f"parse errors detected: {totals['parse_error_count']}")
@@ -154,6 +180,7 @@ def evaluate_quality(
         failures.extend(f"{kind}: {reason}" for reason in kind_failures)
         per_kind[kind] = {
             **{key: int(value) for key, value in metrics.items()},
+            "unresolved_count": int(metrics["resolution_unresolved_count"]),
             "structure_fingerprints": sorted(fingerprints.get(kind, set())),
             "quality_status": "fail" if kind_failures else "pass",
             "failure_reasons": kind_failures,
@@ -170,6 +197,7 @@ def evaluate_quality(
             **{key: int(value) for key, value in totals.items()},
             "fetch_error_rate_percent": round(fetch_error_rate, 4),
             "parse_error_rate_percent": round(parse_error_rate, 4),
+            "unresolved_rate_percent": round(unresolved_rate, 4),
         },
         "per_kind": per_kind,
         "failure_reasons": failures,
@@ -200,6 +228,7 @@ def main() -> int:
             sample_per_kind=args.sample_per_kind,
             kinds=[kind.strip() for kind in args.kinds.split(",") if kind.strip()],
             fail_on_fetch_error_rate=args.fail_on_fetch_error_rate,
+            fail_on_unresolved_rate=args.fail_on_unresolved_rate,
         )
     except ValueError as exc:
         result = {

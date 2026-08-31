@@ -16,6 +16,7 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
     shard-summary.json
     quality-status.json
     coverage-summary.csv
+    proposed-detail-url-overrides.json
   checksums/
     SHA256SUMS
   encrypted/
@@ -74,6 +75,8 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
     "table_row_count": 400,
     "link_row_count": 100,
     "phone_number_row_count": 100,
+    "unresolved_count": 0,
+    "unresolved_rate_percent": 0,
     "fetch_error_rate_percent": 0,
     "parse_error_rate_percent": 0
   },
@@ -84,7 +87,14 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
 
 `quality_status=pass` は、canaryの場合に4種別各25件以上、parse error /
 unknown / fallbackが0件、section/table/link/phoneの抽出が各種別で0件でないことを
-意味します。fetch errorは既存の設定閾値で別に判定します。
+意味します。fetch errorは既存の設定閾値で別に判定し、Navii detail identifierの
+unresolvedは全体1.0%以下なら許容します。unresolved行は公式source行を保持し、
+Navii専用のdetail URL・table・link・phone出力を空欄または未出力にします。
+
+`*-proposed-detail-url-overrides.json` がある場合、各提案には失敗した
+`previous_detail_url`、厳密検索で解決した`detail_url`、source ID、施設名、所在地、
+理由、検証日、検索結果の識別子が含まれます。これはcanonical mapへ昇格する前の
+監査用であり、raw HTMLやsession情報は含みません。
 
 ## Full-run preflight audit
 
@@ -101,6 +111,7 @@ preflight-audit-manifest.json
 metrics/
   *-run-metrics.json
   *-coverage-summary.csv.gz
+  *-proposed-detail-url-overrides.json
   quality-status.json
 shards/downloaded/
   navii-detail-preflight-shard-*/

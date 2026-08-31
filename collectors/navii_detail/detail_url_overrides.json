@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "overrides": [
+    {
+      "source_kind": "clinic",
+      "source_id": "1021012511471",
+      "pref_cd": "10",
+      "kikan_kbn": "2",
+      "kikan_cd": "2100002055",
+      "facility_name": "いじま内科・消化器内科",
+      "address": "群馬県太田市飯塚町",
+      "reason": "Official open-data ID returned Navii E-0109; exact prefecture, kind, name, and address search verified the current detail ID.",
+      "verified_at": "2026-09-01",
+      "detail_url": "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2430/initialize?prefCd=10&kikanKbn=2&kikanCd=2100002055"
+    }
+  ]
+}

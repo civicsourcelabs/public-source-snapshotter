@@ -24,12 +24,13 @@ import re
 import ssl
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -46,6 +47,18 @@ OPEN_DATA_FILE_TEMPLATES = {
 NAVII_DETAIL_BASE = (
     "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2430/initialize"
 )
+NAVII_SEARCH_BASE = (
+    "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2310/initialize"
+)
+NAVII_SEARCH_ENDPOINTS = {
+    "pharmacy": "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2310/yakkyokuSearch",
+    "default": "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2310/iryoSearch",
+}
+DETAIL_URL_OVERRIDES_PATH = Path(__file__).with_name("detail_url_overrides.json")
+DETAIL_URL_OVERRIDE_SCHEMA_VERSION = "1.0"
+DETAIL_URL_OVERRIDE_KINDS = {"hospital", "clinic", "dental", "pharmacy"}
+NAVII_NOT_FOUND_ERROR = "E-0109"
+UNRESOLVED_RATE_DEFAULT = 1.0
 
 PRODUCT_BY_KIND = {
     "hospital": "medical",
@@ -158,6 +171,33 @@ class DetailFetchResponse:
 
 class NaviiParseError(ValueError):
     """Raised when a fetched response cannot satisfy the Navii detail contract."""
+
+
+class NaviiDetailIdentifierNotFound(NaviiParseError):
+    """Raised when Navii returns a valid HTML page for an obsolete detail ID."""
+
+
+class NaviiSearchError(ValueError):
+    """Raised when the exact Navii search cannot produce a trustworthy result."""
+
+
+@dataclass(frozen=True)
+class DetailURLResolution:
+    output_candidate: NaviiCandidate
+    request_candidate: NaviiCandidate
+    status: str
+    reason: str
+    derived_url: str
+
+
+@dataclass(frozen=True)
+class NaviiSearchMatch:
+    name: str
+    address: str
+    pref_cd: str
+    kikan_kbn: str
+    kikan_cd: str
+    detail_url: str
 
 
 @dataclass(frozen=True)
@@ -351,6 +391,18 @@ def parse_args() -> argparse.Namespace:
         help="Exit non-zero if parse error rate is greater than this percent.",
     )
     parser.add_argument(
+        "--fail-on-unresolved-rate",
+        type=float,
+        default=UNRESOLVED_RATE_DEFAULT,
+        help="Exit non-zero if unresolved Navii detail rate is greater than this percent.",
+    )
+    parser.add_argument(
+        "--detail-url-overrides",
+        type=Path,
+        default=DETAIL_URL_OVERRIDES_PATH,
+        help="Version-controlled JSON map for verified Navii detail URL exceptions.",
+    )
+    parser.add_argument(
         "--fail-fast-on-parse-error",
         action="store_true",
         help="Stop submitting candidates and fail after the first parse error.",
@@ -432,6 +484,112 @@ def build_detail_url(pref_cd: str, kikan_kbn: str, kikan_cd: str) -> str:
     return f"{NAVII_DETAIL_BASE}?{query}"
 
 
+def _required_override_value(entry: dict[str, object], key: str) -> str:
+    value = entry.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"detail URL override field {key!r} must be a non-empty string")
+    return value.strip()
+
+
+def _validate_override_detail_url(entry: dict[str, object]) -> None:
+    source_kind = _required_override_value(entry, "source_kind")
+    source_id = _required_override_value(entry, "source_id")
+    pref_cd = _required_override_value(entry, "pref_cd")
+    kikan_kbn = _required_override_value(entry, "kikan_kbn")
+    kikan_cd = _required_override_value(entry, "kikan_cd")
+    if source_kind not in DETAIL_URL_OVERRIDE_KINDS:
+        raise ValueError(f"unsupported detail URL override source_kind: {source_kind}")
+    derived_pref_cd, derived_kikan_kbn, _ = parse_navii_id(source_id)
+    if not derived_pref_cd or not derived_kikan_kbn:
+        raise ValueError(f"invalid detail URL override source_id: {source_id}")
+    if (pref_cd, kikan_kbn) != (derived_pref_cd, derived_kikan_kbn):
+        raise ValueError(
+            f"detail URL override source identity mismatch for {source_kind}/{source_id}"
+        )
+    if not re.fullmatch(r"\d{2}", pref_cd) or not re.fullmatch(r"\d", kikan_kbn):
+        raise ValueError(f"invalid detail URL override query identity for {source_kind}/{source_id}")
+    for key in ("facility_name", "address", "reason", "verified_at", "detail_url"):
+        _required_override_value(entry, key)
+    try:
+        datetime.strptime(_required_override_value(entry, "verified_at"), "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(
+            f"detail URL override verified_at must be YYYY-MM-DD for {source_kind}/{source_id}"
+        ) from exc
+
+    parsed_url = urllib.parse.urlparse(_required_override_value(entry, "detail_url"))
+    expected_host = urllib.parse.urlparse(NAVII_DETAIL_BASE).hostname
+    if (
+        parsed_url.scheme != "https"
+        or parsed_url.hostname != expected_host
+        or parsed_url.path != urllib.parse.urlparse(NAVII_DETAIL_BASE).path
+    ):
+        raise ValueError(f"detail URL override has an invalid Navii detail URL for {source_kind}/{source_id}")
+    query = urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True)
+    expected_query = {
+        "prefCd": pref_cd,
+        "kikanKbn": kikan_kbn,
+        "kikanCd": kikan_cd,
+    }
+    if any(query.get(key) != [value] for key, value in expected_query.items()):
+        raise ValueError(f"detail URL override query identity mismatch for {source_kind}/{source_id}")
+
+
+def load_detail_url_overrides(path: Path = DETAIL_URL_OVERRIDES_PATH) -> dict[tuple[str, str], dict[str, str]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid detail URL override map: {path.name}: {type(exc).__name__}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != DETAIL_URL_OVERRIDE_SCHEMA_VERSION:
+        raise ValueError(
+            f"detail URL override map schema_version must be {DETAIL_URL_OVERRIDE_SCHEMA_VERSION}"
+        )
+    entries = payload.get("overrides")
+    if not isinstance(entries, list):
+        raise ValueError("detail URL override map overrides must be a list")
+
+    overrides: dict[tuple[str, str], dict[str, str]] = {}
+    for index, raw_entry in enumerate(entries):
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"detail URL override entry {index} must be an object")
+        _validate_override_detail_url(raw_entry)
+        entry = {key: _required_override_value(raw_entry, key) for key in (
+            "source_kind",
+            "source_id",
+            "pref_cd",
+            "kikan_kbn",
+            "kikan_cd",
+            "facility_name",
+            "address",
+            "reason",
+            "verified_at",
+            "detail_url",
+        )}
+        key = (entry["source_kind"], entry["source_id"])
+        if key in overrides:
+            raise ValueError(f"duplicate detail URL override key: {key[0]}/{key[1]}")
+        overrides[key] = entry
+    return overrides
+
+
+def detail_url_override_hash(overrides: dict[tuple[str, str], dict[str, str]]) -> str:
+    payload = json.dumps(
+        [overrides[key] for key in sorted(overrides)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def normalize_match_text(value: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", value or "")).strip()
+
+
+def normalize_match_address(value: str) -> str:
+    normalized = normalize_match_text(value).replace("〒", "")
+    return re.sub(r"^\d{3}-?\d{4}", "", normalized)
+
+
 def open_data_zip_for(open_data_dir: Path, csv_name: str) -> Path:
     for zip_path in sorted(open_data_dir.glob("*.zip")):
         with zipfile.ZipFile(zip_path) as archive:
@@ -452,6 +610,7 @@ def read_open_data_rows(
     kinds: Iterable[str],
     *,
     source_snapshot_date: str,
+    detail_url_overrides: dict[tuple[str, str], dict[str, str]] | None = None,
 ) -> list[NaviiCandidate]:
     rows: list[NaviiCandidate] = []
     for kind in kinds:
@@ -473,6 +632,7 @@ def read_open_data_rows(
                 or ""
             ).strip()
             address = (row.get("所在地") or "").strip()
+            override = (detail_url_overrides or {}).get((kind, navii_id))
             rows.append(
                 NaviiCandidate(
                     source_kind=kind,
@@ -483,7 +643,11 @@ def read_open_data_rows(
                     kikan_cd=kikan_cd,
                     name=name,
                     address=address,
-                    detail_url=build_detail_url(pref_cd, kikan_kbn, kikan_cd),
+                    detail_url=(
+                        override["detail_url"]
+                        if override
+                        else build_detail_url(pref_cd, kikan_kbn, kikan_cd)
+                    ),
                 )
             )
     return rows
@@ -642,6 +806,8 @@ SUMMARY_FIELDNAMES = [
     "detail_url",
     "fetch_status",
     "parse_status",
+    "navii_detail_status",
+    "navii_detail_reason",
     "target_group",
     "section_title",
     "section_text_sample",
@@ -723,6 +889,8 @@ PAGE_COVERAGE_FIELDNAMES = [
     "detail_url",
     "fetch_status",
     "parse_status",
+    "navii_detail_status",
+    "navii_detail_reason",
     "target_group",
     "has_target_group",
     "has_extractable_table",
@@ -822,6 +990,241 @@ def is_retryable_fetch_error(exc: BaseException) -> bool:
 
 def retry_delay_seconds(base_seconds: float, attempt: int) -> float:
     return base_seconds * (2**attempt)
+
+
+def resolve_candidate_url(
+    candidate: NaviiCandidate,
+    overrides: dict[tuple[str, str], dict[str, str]],
+) -> DetailURLResolution:
+    derived_url = build_detail_url(candidate.pref_cd, candidate.kikan_kbn, candidate.kikan_cd)
+    override = overrides.get((candidate.source_kind, candidate.navii_id))
+    if not override:
+        request_candidate = replace(candidate, detail_url=derived_url)
+        return DetailURLResolution(
+            output_candidate=candidate,
+            request_candidate=request_candidate,
+            status="derived_hit",
+            reason="",
+            derived_url=derived_url,
+        )
+
+    request_candidate = replace(
+        candidate,
+        pref_cd=override["pref_cd"],
+        kikan_kbn=override["kikan_kbn"],
+        kikan_cd=override["kikan_cd"],
+        detail_url=override["detail_url"],
+    )
+    return DetailURLResolution(
+        output_candidate=replace(candidate, detail_url=override["detail_url"]),
+        request_candidate=request_candidate,
+        status="override_hit",
+        reason=override["reason"],
+        derived_url=derived_url,
+    )
+
+
+def _search_opener(*, insecure_skip_tls_verify: bool) -> urllib.request.OpenerDirector:
+    cookie_jar = urllib.request.HTTPCookieProcessor()
+    handlers: list[Any] = [cookie_jar]
+    if insecure_skip_tls_verify:
+        handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    return urllib.request.build_opener(*handlers)
+
+
+def _search_open_text(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    *,
+    headers: dict[str, str],
+    user_agent: str,
+    user_agent_mode: str,
+    request_seed: int,
+    timeout_seconds: float,
+    retry_count: int,
+    retry_backoff_seconds: float,
+) -> str:
+    last_error: BaseException | None = None
+    for attempt in range(max(retry_count, 0) + 1):
+        request_headers = dict(headers)
+        request_headers["User-Agent"] = choose_user_agent(
+            user_agent=user_agent,
+            user_agent_mode=user_agent_mode,
+            request_seed=request_seed + attempt,
+        )
+        try:
+            with opener.open(urllib.request.Request(url, headers=request_headers), timeout=timeout_seconds) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return response.read().decode(charset, errors="replace")
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
+            last_error = exc
+            if attempt >= retry_count or not is_retryable_fetch_error(exc):
+                raise NaviiSearchError(f"Navii exact search request failed: {type(exc).__name__}") from exc
+            time.sleep(retry_delay_seconds(retry_backoff_seconds, attempt))
+    raise NaviiSearchError(f"Navii exact search request failed: {type(last_error).__name__}")
+
+
+def parse_navii_search_matches(page_html: str) -> list[NaviiSearchMatch]:
+    lxml_html = require_lxml_html()
+    try:
+        document = lxml_html.document_fromstring(page_html)
+    except (TypeError, ValueError) as exc:
+        raise NaviiSearchError(f"Navii exact search response HTML invalid: {type(exc).__name__}") from exc
+
+    matches: list[NaviiSearchMatch] = []
+    items = document.xpath(
+        "//div[contains(concat(' ', normalize-space(@class), ' '), ' resultItems ')]"
+        "//div[contains(concat(' ', normalize-space(@class), ' '), ' item ')]"
+    )
+    for item in items:
+        anchors = item.xpath(
+            ".//h2[contains(concat(' ', normalize-space(@class), ' '), ' name ')]//a[@href]"
+        )
+        if not anchors:
+            continue
+        anchor = anchors[0]
+        href = str(anchor.get("href") or "").strip()
+        detail_url = urllib.parse.urljoin(NAVII_DETAIL_BASE, href)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(detail_url).query)
+        pref_cd = (query.get("prefCd") or [""])[0]
+        kikan_kbn = (query.get("kikanKbn") or [""])[0]
+        kikan_cd = (query.get("kikanCd") or [""])[0]
+        if not (pref_cd and kikan_kbn and kikan_cd):
+            continue
+        name = normalize_match_text("".join(anchor.itertext()))
+        address_nodes = item.xpath(
+            ".//dt[.//img[@alt='住所']]/following-sibling::dd[1]//p"
+        )
+        address = normalize_match_address(
+            " ".join("".join(node.itertext()) for node in address_nodes)
+        )
+        matches.append(
+            NaviiSearchMatch(
+                name=name,
+                address=address,
+                pref_cd=pref_cd,
+                kikan_kbn=kikan_kbn,
+                kikan_cd=kikan_cd,
+                detail_url=detail_url,
+            )
+        )
+    return matches
+
+
+def search_navii_exact(
+    candidate: NaviiCandidate,
+    *,
+    user_agent: str,
+    user_agent_mode: str,
+    request_seed: int,
+    timeout_seconds: float,
+    insecure_skip_tls_verify: bool,
+    retry_count: int,
+    retry_backoff_seconds: float,
+) -> NaviiSearchMatch:
+    if not candidate.name.strip() or not candidate.address.strip():
+        raise NaviiSearchError("Navii exact search requires facility name and address")
+
+    opener = _search_opener(insecure_skip_tls_verify=insecure_skip_tls_verify)
+    _search_open_text(
+        opener,
+        f"{NAVII_SEARCH_BASE}?pref={urllib.parse.quote(candidate.pref_cd)}",
+        headers={},
+        user_agent=user_agent,
+        user_agent_mode=user_agent_mode,
+        request_seed=request_seed,
+        timeout_seconds=timeout_seconds,
+        retry_count=retry_count,
+        retry_backoff_seconds=retry_backoff_seconds,
+    )
+    endpoint = NAVII_SEARCH_ENDPOINTS["pharmacy" if candidate.source_kind == "pharmacy" else "default"]
+    common_params = {
+        "XCHARSET": "utf-8",
+        "XPARAM": "keyword",
+        "pref": candidate.pref_cd,
+        "iyakuKbn": "2" if candidate.source_kind == "pharmacy" else "1",
+        "lang": "ja",
+        "keywordType": "2",
+        "keyword": candidate.name,
+    }
+    first_url = f"{endpoint}?{urllib.parse.urlencode(common_params)}"
+    first_payload_text = _search_open_text(
+        opener,
+        first_url,
+        headers={"ajaxFlag": "true"},
+        user_agent=user_agent,
+        user_agent_mode=user_agent_mode,
+        request_seed=request_seed + 1,
+        timeout_seconds=timeout_seconds,
+        retry_count=retry_count,
+        retry_backoff_seconds=retry_backoff_seconds,
+    )
+    try:
+        first_payload = json.loads(first_payload_text)
+    except json.JSONDecodeError as exc:
+        raise NaviiSearchError("Navii exact search returned invalid JSON") from exc
+    if not isinstance(first_payload, dict) or str(first_payload.get("code")) != "0":
+        raise NaviiSearchError("Navii exact search returned a business error")
+    first_result = first_payload.get("result")
+    search_id = str(first_result.get("id") or "") if isinstance(first_result, dict) else ""
+    if not search_id:
+        raise NaviiSearchError("Navii exact search did not return a search id")
+
+    address_params = {
+        "XCHARSET": "utf-8",
+        "XPARAM": "keyword",
+        "keywordType": "4",
+        "keyword": candidate.address,
+        "id": search_id,
+    }
+    second_url = f"{endpoint}?{urllib.parse.urlencode(address_params)}"
+    second_payload_text = _search_open_text(
+        opener,
+        second_url,
+        headers={"ajaxFlag": "true"},
+        user_agent=user_agent,
+        user_agent_mode=user_agent_mode,
+        request_seed=request_seed + 2,
+        timeout_seconds=timeout_seconds,
+        retry_count=retry_count,
+        retry_backoff_seconds=retry_backoff_seconds,
+    )
+    try:
+        second_payload = json.loads(second_payload_text)
+    except json.JSONDecodeError as exc:
+        raise NaviiSearchError("Navii exact search address step returned invalid JSON") from exc
+    if not isinstance(second_payload, dict) or str(second_payload.get("code")) != "0":
+        raise NaviiSearchError("Navii exact address search returned a business error")
+
+    results_html = _search_open_text(
+        opener,
+        f"{NAVII_DETAIL_BASE.replace('/S2430/', '/S2400/')}?id={urllib.parse.quote(search_id)}",
+        headers={},
+        user_agent=user_agent,
+        user_agent_mode=user_agent_mode,
+        request_seed=request_seed + 3,
+        timeout_seconds=timeout_seconds,
+        retry_count=retry_count,
+        retry_backoff_seconds=retry_backoff_seconds,
+    )
+    expected_name = normalize_match_text(candidate.name)
+    expected_address = normalize_match_address(candidate.address)
+    exact_matches = [
+        match
+        for match in parse_navii_search_matches(results_html)
+        if (
+            match.pref_cd == candidate.pref_cd
+            and match.kikan_kbn == candidate.kikan_kbn
+            and match.name == expected_name
+            and match.address == expected_address
+        )
+    ]
+    if len(exact_matches) != 1:
+        raise NaviiSearchError(
+            "Navii exact search did not return one matching facility: "
+            f"count={len(exact_matches)}"
+        )
+    return exact_matches[0]
 
 
 def require_lxml_html() -> Any:
@@ -1085,6 +1488,10 @@ def validate_detail_response(response: DetailFetchResponse, candidate: NaviiCand
         raise NaviiParseError(f"unexpected detail response status={response.status_code}")
     if response.content_type and response.content_type not in {"text/html", "application/xhtml+xml"}:
         raise NaviiParseError(f"unexpected detail content type={response.content_type}")
+    if NAVII_NOT_FOUND_ERROR in response.html or "指定されたデータは存在しません" in response.html:
+        raise NaviiDetailIdentifierNotFound(
+            "Navii detail identifier was not found in the current source"
+        )
 
     expected_query = urllib.parse.parse_qs(urllib.parse.urlparse(candidate.detail_url).query)
     final_query = urllib.parse.parse_qs(urllib.parse.urlparse(response.final_url).query)
@@ -1115,6 +1522,16 @@ def parse_error_reason(error: str) -> str:
     if "identity mismatch" in error:
         return "identity_mismatch"
     return "parse_error"
+
+
+def unresolved_reason(error: str) -> str:
+    if "did not return one matching facility" in error:
+        return "exact_search_no_unique_match"
+    if "requires facility name and address" in error:
+        return "exact_search_missing_match_fields"
+    if "exact search" in error:
+        return "exact_search_error"
+    return "detail_identifier_not_found"
 
 
 def analyze_detail(
@@ -1490,6 +1907,8 @@ def build_page_coverage_rows(
     error: str,
     section_summaries: list[dict[str, str]],
     section_tables: list[dict[str, str]],
+    navii_detail_status: str = "derived_hit",
+    navii_detail_reason: str = "",
 ) -> list[dict[str, str]]:
     section_counts = Counter(row["target_group"] for row in section_summaries)
     extractable_counts = Counter(
@@ -1520,6 +1939,8 @@ def build_page_coverage_rows(
                 **candidate.__dict__,
                 "fetch_status": fetch_status,
                 "parse_status": parse_status,
+                "navii_detail_status": navii_detail_status,
+                "navii_detail_reason": navii_detail_reason,
                 "target_group": target_group,
                 "has_target_group": "true" if section_count else "false",
                 "has_extractable_table": "true" if extractable_counts[target_group] else "false",
@@ -1538,9 +1959,65 @@ def process_candidate(
     candidate: NaviiCandidate,
     args: argparse.Namespace,
 ) -> dict[str, object]:
+    overrides = getattr(args, "detail_url_overrides", {})
+    resolution = resolve_candidate_url(candidate, overrides)
+    output_candidate = resolution.output_candidate
+    request_candidate = resolution.request_candidate
+    navii_detail_status = resolution.status
+    proposed_override: dict[str, str] | None = None
+
+    def unresolved_result(reason: str) -> dict[str, object]:
+        blank_candidate = replace(output_candidate, detail_url="")
+        summary_rows = [
+            {
+                **blank_candidate.__dict__,
+                "fetch_status": "ok",
+                "parse_status": "not_run",
+                "navii_detail_status": "unresolved",
+                "navii_detail_reason": reason,
+                "target_group": "",
+                "section_title": "",
+                "section_text_sample": "",
+                "table_count": "0",
+                "has_extractable_table": "false",
+                "error": "",
+            }
+        ]
+        page_coverage_rows = build_page_coverage_rows(
+            blank_candidate,
+            "ok",
+            "not_run",
+            "",
+            [],
+            [],
+            "unresolved",
+            reason,
+        )
+        return {
+            "index": index,
+            "candidate": blank_candidate,
+            "fetch_status": "ok",
+            "parse_status": "not_run",
+            "resolution_status": "unresolved",
+            "resolution_reason": reason,
+            "parse_error_reason": "",
+            "error": "",
+            "section_count": 0,
+            "table_row_count": 0,
+            "link_row_count": 0,
+            "phone_number_row_count": 0,
+            "structure_fingerprint": "",
+            "proposed_override": proposed_override,
+            "summary_rows": summary_rows,
+            "table_rows": [],
+            "phone_rows": [],
+            "link_rows": [],
+            "page_coverage_rows": page_coverage_rows,
+        }
+
     try:
         response = fetch_detail_html(
-            candidate.detail_url,
+            request_candidate.detail_url,
             user_agent=args.user_agent,
             user_agent_mode=args.user_agent_mode,
             request_seed=index,
@@ -1549,10 +2026,63 @@ def process_candidate(
             retry_count=args.retry_count,
             retry_backoff_seconds=args.retry_backoff_seconds,
         )
-        validate_detail_response(response, candidate)
+        try:
+            validate_detail_response(response, request_candidate)
+        except NaviiDetailIdentifierNotFound:
+            failed_detail_url = request_candidate.detail_url
+            try:
+                match = search_navii_exact(
+                    candidate,
+                    user_agent=args.user_agent,
+                    user_agent_mode=args.user_agent_mode,
+                    request_seed=index,
+                    timeout_seconds=args.timeout_seconds,
+                    insecure_skip_tls_verify=args.insecure_skip_tls_verify,
+                    retry_count=args.retry_count,
+                    retry_backoff_seconds=args.retry_backoff_seconds,
+                )
+            except NaviiSearchError as exc:
+                return unresolved_result(unresolved_reason(str(exc)))
+            request_candidate = replace(
+                request_candidate,
+                pref_cd=match.pref_cd,
+                kikan_kbn=match.kikan_kbn,
+                kikan_cd=match.kikan_cd,
+                detail_url=match.detail_url,
+            )
+            output_candidate = replace(output_candidate, detail_url=match.detail_url)
+            navii_detail_status = "search_resolved"
+            response = fetch_detail_html(
+                request_candidate.detail_url,
+                user_agent=args.user_agent,
+                user_agent_mode=args.user_agent_mode,
+                request_seed=index + 1000000,
+                timeout_seconds=args.timeout_seconds,
+                insecure_skip_tls_verify=args.insecure_skip_tls_verify,
+                retry_count=args.retry_count,
+                retry_backoff_seconds=args.retry_backoff_seconds,
+            )
+            try:
+                validate_detail_response(response, request_candidate)
+            except NaviiDetailIdentifierNotFound:
+                return unresolved_result("detail_identifier_not_found_after_exact_search")
+            proposed_override = {
+                "source_kind": candidate.source_kind,
+                "source_id": candidate.navii_id,
+                "pref_cd": match.pref_cd,
+                "kikan_kbn": match.kikan_kbn,
+                "kikan_cd": match.kikan_cd,
+                "facility_name": candidate.name,
+                "address": candidate.address,
+                "previous_detail_url": failed_detail_url,
+                "reason": "resolved by exact Navii search after detail identifier not found",
+                "verified_at": datetime.now(timezone.utc).date().isoformat(),
+                "detail_url": match.detail_url,
+            }
+
         section_summaries, section_tables, phone_numbers, links, fingerprint = analyze_detail_result(
             response.html,
-            page_url=candidate.detail_url,
+            page_url=output_candidate.detail_url,
         )
         if not section_tables:
             raise NaviiParseError("no extractable table rows found")
@@ -1563,28 +2093,40 @@ def process_candidate(
         for row in section_summaries:
             summary_rows.append(
                 {
-                    **candidate.__dict__,
+                    **output_candidate.__dict__,
                     "fetch_status": "ok",
                     "parse_status": "ok",
+                    "navii_detail_status": navii_detail_status,
+                    "navii_detail_reason": "",
                     "error": "",
                     **row,
                 }
             )
         for row in section_tables:
-            table_rows.append({**candidate.__dict__, **row})
+            table_rows.append({**output_candidate.__dict__, **row})
         for row in phone_numbers:
-            phone_rows.append({**candidate.__dict__, **row})
+            phone_rows.append({**output_candidate.__dict__, **row})
         for row in links:
-            link_rows.append({**candidate.__dict__, **row})
+            link_rows.append({**output_candidate.__dict__, **row})
         page_coverage_rows = build_page_coverage_rows(
-            candidate, "ok", "ok", "", section_summaries, section_tables
+            output_candidate,
+            "ok",
+            "ok",
+            "",
+            section_summaries,
+            section_tables,
+            navii_detail_status,
+            "",
         )
         return {
             "index": index,
-            "candidate": candidate,
+            "candidate": output_candidate,
             "fetch_status": "ok",
             "parse_status": "ok",
+            "resolution_status": navii_detail_status,
+            "resolution_reason": "",
             "parse_error_reason": "",
+            "proposed_override": proposed_override,
             "error": "",
             "section_count": sum(
                 1 for row in section_summaries if row["target_group"] == ALL_DETAIL_GROUP
@@ -1603,9 +2145,11 @@ def process_candidate(
         error = str(exc)
         summary_rows = [
             {
-                **candidate.__dict__,
+                **output_candidate.__dict__,
                 "fetch_status": "ok",
                 "parse_status": "error",
+                "navii_detail_status": "parse_error",
+                "navii_detail_reason": "",
                 "target_group": "",
                 "section_title": "",
                 "section_text_sample": "",
@@ -1615,14 +2159,24 @@ def process_candidate(
             }
         ]
         page_coverage_rows = build_page_coverage_rows(
-            candidate, "ok", "error", error, [], []
+            output_candidate,
+            "ok",
+            "error",
+            error,
+            [],
+            [],
+            "parse_error",
+            "",
         )
         return {
             "index": index,
-            "candidate": candidate,
+            "candidate": output_candidate,
             "fetch_status": "ok",
             "parse_status": "error",
+            "resolution_status": "parse_error",
+            "resolution_reason": "",
             "parse_error_reason": parse_error_reason(error),
+            "proposed_override": proposed_override,
             "error": error,
             "section_count": 0,
             "table_row_count": 0,
@@ -1636,12 +2190,14 @@ def process_candidate(
             "page_coverage_rows": page_coverage_rows,
         }
     except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
-        error = str(exc)
+        error = f"{type(exc).__name__}"
         summary_rows = [
             {
-                **candidate.__dict__,
+                **output_candidate.__dict__,
                 "fetch_status": "error",
                 "parse_status": "not_run",
+                "navii_detail_status": "fetch_error",
+                "navii_detail_reason": "",
                 "target_group": "",
                 "section_title": "",
                 "section_text_sample": "",
@@ -1651,14 +2207,24 @@ def process_candidate(
             }
         ]
         page_coverage_rows = build_page_coverage_rows(
-            candidate, "error", "not_run", error, [], []
+            output_candidate,
+            "error",
+            "not_run",
+            error,
+            [],
+            [],
+            "fetch_error",
+            "",
         )
         return {
             "index": index,
-            "candidate": candidate,
+            "candidate": output_candidate,
             "fetch_status": "error",
             "parse_status": "not_run",
+            "resolution_status": "fetch_error",
+            "resolution_reason": "",
             "parse_error_reason": "",
+            "proposed_override": proposed_override,
             "error": error,
             "section_count": 0,
             "table_row_count": 0,
@@ -1738,13 +2304,20 @@ def main() -> int:
         raise SystemExit(f"Unknown kind(s): {', '.join(invalid)}")
     if not 0 <= args.sample_fraction <= 1:
         raise SystemExit("--sample-fraction must be between 0 and 1")
+    if not 0 <= args.fail_on_unresolved_rate <= 100:
+        raise SystemExit("--fail-on-unresolved-rate must be between 0 and 100")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        args.detail_url_overrides = load_detail_url_overrides(args.detail_url_overrides)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     all_rows = read_open_data_rows(
         args.open_data_dir,
         kinds,
         source_snapshot_date=args.source_snapshot_date,
+        detail_url_overrides=args.detail_url_overrides,
     )
     selected_candidates = select_candidates(
         all_rows,
@@ -1775,8 +2348,21 @@ def main() -> int:
         args.out_dir / "coverage-summary.csv",
         gzip_output=args.gzip_output,
     )
+    proposed_overrides_path = args.out_dir / "proposed-detail-url-overrides.json"
     metrics_path = args.out_dir / "run-metrics.json"
     write_candidates(candidates_path, candidates)
+    proposed_overrides_path.write_text(
+        json.dumps(
+            {
+                "schema_version": DETAIL_URL_OVERRIDE_SCHEMA_VERSION,
+                "overrides": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     if not args.execute:
         write_summary(summary_path, [])
@@ -1804,6 +2390,13 @@ def main() -> int:
             "shard_index": args.shard_index,
             "shard_count": args.shard_count,
             "workers": args.workers,
+            "detail_url_override_count": len(args.detail_url_overrides),
+            "detail_url_overrides_hash": detail_url_override_hash(args.detail_url_overrides),
+            "override_hit_count": 0,
+            "derived_hit_count": 0,
+            "search_resolved_count": 0,
+            "unresolved_count": 0,
+            "unresolved_rate_percent": 0,
             "fetch_ok_count": 0,
             "fetch_error_count": 0,
             "fetch_error_rate": 0,
@@ -1819,6 +2412,7 @@ def main() -> int:
             "phone_numbers": str(phone_numbers_path),
             "page_coverage": str(page_coverage_path),
             "coverage_summary": str(coverage_summary_path),
+            "proposed_detail_url_overrides": str(proposed_overrides_path),
             "metrics": str(metrics_path),
         }
         metrics_path.write_text(
@@ -1871,6 +2465,7 @@ def main() -> int:
     counts = Counter()
     kind_metrics: dict[str, Counter[str]] = defaultdict(Counter)
     kind_fingerprints: dict[str, set[str]] = defaultdict(set)
+    proposed_overrides: list[dict[str, str]] = []
     early_failure_reason = ""
 
     summary_handle, summary_writer = csv_writer(
@@ -1950,12 +2545,14 @@ def main() -> int:
             counts["section_count"] += int(result["section_count"])
             counts[f"fetch_{result['fetch_status']}"] += 1
             counts[f"parse_{result['parse_status']}"] += 1
+            counts[f"resolution_{result['resolution_status']}"] += 1
             result_candidate = result["candidate"]
             assert isinstance(result_candidate, NaviiCandidate)
             kind_counter = kind_metrics[result_candidate.source_kind]
             kind_counter["candidate_count"] += 1
             kind_counter[f"fetch_{result['fetch_status']}_count"] += 1
             kind_counter[f"parse_{result['parse_status']}_count"] += 1
+            kind_counter[f"resolution_{result['resolution_status']}_count"] += 1
             kind_counter["section_count"] += int(result["section_count"])
             kind_counter["table_row_count"] += int(result["table_row_count"])
             kind_counter["link_row_count"] += int(result["link_row_count"])
@@ -1963,9 +2560,16 @@ def main() -> int:
             parse_reason = str(result["parse_error_reason"] or "")
             if parse_reason:
                 kind_counter[f"parse_error_reason:{parse_reason}"] += 1
+            resolution_reason = str(result["resolution_reason"] or "")
+            if result["resolution_status"] == "unresolved" and resolution_reason:
+                kind_counter[f"unresolved_reason:{resolution_reason}"] += 1
             fingerprint = str(result["structure_fingerprint"] or "")
             if fingerprint:
                 kind_fingerprints[result_candidate.source_kind].add(fingerprint)
+
+            proposed_override = result.get("proposed_override")
+            if isinstance(proposed_override, dict):
+                proposed_overrides.append(proposed_override)
 
             if args.progress_every > 0 and completed_count % args.progress_every == 0:
                 print(
@@ -2058,12 +2662,35 @@ def main() -> int:
     if temp_to_final:
         replace_temp_outputs(temp_to_final)
 
+    unique_proposed_overrides = {
+        (row["source_kind"], row["source_id"]): row
+        for row in proposed_overrides
+    }
+    proposed_overrides_path.write_text(
+        json.dumps(
+            {
+                "schema_version": DETAIL_URL_OVERRIDE_SCHEMA_VERSION,
+                "overrides": [
+                    unique_proposed_overrides[key]
+                    for key in sorted(unique_proposed_overrides)
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     total_fetch_count = counts["fetch_ok"] + counts["fetch_error"]
     fetch_error_rate = (counts["fetch_error"] / total_fetch_count) if total_fetch_count else 0.0
     fetch_error_rate_percent = fetch_error_rate * 100
     parse_attempt_count = counts["parse_ok"] + counts["parse_error"]
     parse_error_rate = (counts["parse_error"] / parse_attempt_count) if parse_attempt_count else 0.0
     parse_error_rate_percent = parse_error_rate * 100
+    unresolved_count = counts["resolution_unresolved"]
+    unresolved_rate = unresolved_count / len(candidates) if candidates else 0.0
+    unresolved_rate_percent = unresolved_rate * 100
     quality_failures: list[str] = []
     if early_failure_reason:
         quality_failures.append(early_failure_reason)
@@ -2074,6 +2701,10 @@ def main() -> int:
     if parse_error_rate_percent > args.fail_on_parse_error_rate:
         quality_failures.append(
             f"parse_error_rate {parse_error_rate_percent:.2f}% exceeded {args.fail_on_parse_error_rate:.2f}%"
+        )
+    if unresolved_rate_percent > args.fail_on_unresolved_rate:
+        quality_failures.append(
+            f"unresolved_rate {unresolved_rate_percent:.2f}% exceeded {args.fail_on_unresolved_rate:.2f}%"
         )
     if counts["parse_ok"] and counts["table_rows"] == 0:
         quality_failures.append("no extractable table rows after successful parsing")
@@ -2087,6 +2718,12 @@ def main() -> int:
                     "fetch_error_count",
                     "parse_ok_count",
                     "parse_error_count",
+                    "resolution_override_hit_count",
+                    "resolution_derived_hit_count",
+                    "resolution_search_resolved_count",
+                    "resolution_unresolved_count",
+                    "resolution_parse_error_count",
+                    "resolution_fetch_error_count",
                     "section_count",
                     "table_row_count",
                     "link_row_count",
@@ -2100,6 +2737,11 @@ def main() -> int:
                 key.split(":", 1)[1]: int(value)
                 for key, value in counter.items()
                 if key.startswith("parse_error_reason:")
+            },
+            "unresolved_reasons": {
+                key.split(":", 1)[1]: int(value)
+                for key, value in counter.items()
+                if key.startswith("unresolved_reason:")
             },
         }
         for kind, counter in sorted(kind_metrics.items())
@@ -2143,6 +2785,9 @@ def main() -> int:
         "parse_error_count": counts["parse_error"],
         "parse_error_rate": round(parse_error_rate, 6),
         "parse_error_rate_percent": round(parse_error_rate_percent, 4),
+        "unresolved_count": unresolved_count,
+        "unresolved_rate": round(unresolved_rate, 6),
+        "unresolved_rate_percent": round(unresolved_rate_percent, 4),
         "started_at": started_at,
         "completed_at": completed_at,
         "summary_rows": counts["summary_rows"],
@@ -2150,6 +2795,12 @@ def main() -> int:
         "table_rows": counts["table_rows"],
         "link_rows": counts["link_rows"],
         "phone_number_rows": counts["phone_number_rows"],
+        "override_hit_count": counts["resolution_override_hit"],
+        "derived_hit_count": counts["resolution_derived_hit"],
+        "search_resolved_count": counts["resolution_search_resolved"],
+        "detail_url_override_count": len(args.detail_url_overrides),
+        "detail_url_overrides_hash": detail_url_override_hash(args.detail_url_overrides),
+        "proposed_override_count": len(unique_proposed_overrides),
         "page_coverage_rows": counts["page_coverage_rows"],
         "kind_metrics": serialized_kind_metrics,
         "candidates": str(candidates_path),
@@ -2159,6 +2810,7 @@ def main() -> int:
         "phone_numbers": str(phone_numbers_path),
         "page_coverage": str(page_coverage_path),
         "coverage_summary": str(coverage_summary_path),
+        "proposed_detail_url_overrides": str(proposed_overrides_path),
         "metrics": str(metrics_path),
     }
     metrics_path.write_text(

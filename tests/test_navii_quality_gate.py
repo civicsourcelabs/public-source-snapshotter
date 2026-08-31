@@ -10,7 +10,9 @@ from collectors.navii_detail.quality_gate import evaluate_quality
 KINDS = ["hospital", "clinic", "dental", "pharmacy"]
 
 
-def shard_metrics(*, zero_phone: bool = False, parse_errors: int = 0) -> dict:
+def shard_metrics(
+    *, zero_phone: bool = False, parse_errors: int = 0, unresolved: int = 0
+) -> dict:
     kind_metrics = {}
     for kind in KINDS:
         kind_metrics[kind] = {
@@ -25,6 +27,7 @@ def shard_metrics(*, zero_phone: bool = False, parse_errors: int = 0) -> dict:
             "phone_number_row_count": 0 if zero_phone else 25,
             "unknown_count": 0,
             "fallback_count": 0,
+            "resolution_unresolved_count": unresolved if kind == "clinic" else 0,
             "structure_fingerprints": ["sha256:fixture"],
         }
     return {
@@ -38,6 +41,7 @@ def shard_metrics(*, zero_phone: bool = False, parse_errors: int = 0) -> dict:
         "table_rows": 400,
         "link_rows": 100,
         "phone_number_rows": 100 if not zero_phone else 0,
+        "unresolved_count": unresolved,
         "kind_metrics": kind_metrics,
     }
 
@@ -107,6 +111,34 @@ class NaviiQualityGateTest(unittest.TestCase):
         )
 
         self.assertEqual(result["quality_status"], "not_applicable")
+
+    def test_one_percent_unresolved_is_allowed(self) -> None:
+        result = evaluate_quality(
+            [shard_metrics(unresolved=1)],
+            execute=True,
+            candidate_mode="preflight",
+            sample_per_kind=0,
+            kinds=KINDS,
+            fail_on_fetch_error_rate=5,
+            fail_on_unresolved_rate=1,
+        )
+
+        self.assertEqual(result["quality_status"], "pass")
+        self.assertEqual(result["aggregate"]["unresolved_rate_percent"], 1.0)
+
+    def test_unresolved_above_one_percent_fails(self) -> None:
+        result = evaluate_quality(
+            [shard_metrics(unresolved=2)],
+            execute=True,
+            candidate_mode="preflight",
+            sample_per_kind=0,
+            kinds=KINDS,
+            fail_on_fetch_error_rate=5,
+            fail_on_unresolved_rate=1,
+        )
+
+        self.assertEqual(result["quality_status"], "fail")
+        self.assertTrue(any("unresolved rate" in reason for reason in result["failure_reasons"]))
 
 
 if __name__ == "__main__":
