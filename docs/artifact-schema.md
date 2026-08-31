@@ -14,6 +14,7 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
   metrics/
     fetch-metrics.json
     shard-summary.json
+    quality-status.json
     coverage-summary.csv
   checksums/
     SHA256SUMS
@@ -22,6 +23,10 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
 ```
 
 `summary_only` canaryでは `encrypted/raw-artifacts-shard-*.tar.zst.age` は作らず、summary / metrics / manifest / checksumだけを確認します。
+
+`quality-status.json` はcollectorの抽出品質ゲート結果です。`quality_status` が
+`pass`でないartifactはconsumerへhandoffしません。`candidate_mode=sample`
+の場合はcanaryゲートとして扱い、4種別の抽出件数とparse状態を確認します。
 
 ## `collector-run-manifest.json`
 
@@ -48,6 +53,38 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
   }
 }
 ```
+
+## `quality-status.json`
+
+```json
+{
+  "schema_version": "1.0",
+  "quality_status": "pass",
+  "gate": "canary",
+  "candidate_mode": "sample",
+  "sample_per_kind": 25,
+  "kinds": ["hospital", "clinic", "dental", "pharmacy"],
+  "aggregate": {
+    "candidate_count": 100,
+    "fetch_ok_count": 100,
+    "fetch_error_count": 0,
+    "parse_ok_count": 100,
+    "parse_error_count": 0,
+    "section_count": 200,
+    "table_row_count": 400,
+    "link_row_count": 100,
+    "phone_number_row_count": 100,
+    "fetch_error_rate_percent": 0,
+    "parse_error_rate_percent": 0
+  },
+  "per_kind": {},
+  "failure_reasons": []
+}
+```
+
+`quality_status=pass` は、canaryの場合に4種別各25件以上、parse error /
+unknown / fallbackが0件、section/table/link/phoneの抽出が各種別で0件でないことを
+意味します。fetch errorは既存の設定閾値で別に判定します。
 
 ## `fetch-metrics.json`
 

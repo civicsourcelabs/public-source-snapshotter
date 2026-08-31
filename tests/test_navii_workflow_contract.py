@@ -53,6 +53,7 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", self.workflow)
         self.assertIn("def successful_artifact_exists(run_label: str) -> bool:", self.workflow)
         self.assertIn("actions/artifacts?per_page=100&page=", self.workflow)
+        self.assertIn('run_payload.get("head_sha") == current_sha', self.workflow)
         self.assertIn("skip_existing: ${{ steps.plan.outputs.skip_existing }}", self.workflow)
         self.assertEqual(
             self.workflow.count("if: needs.validate.outputs.skip_existing != 'true'"),
@@ -90,6 +91,25 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("OPEN_DATA_FILES", self.collector)
         self.assertNotIn("20251201", self.collector)
         self.assertNotIn("2025-12-01", self.collector)
+
+    def test_navii_collector_uses_dom_parser_and_fails_closed_on_parse_errors(self) -> None:
+        self.assertIn("NAVII_PARSER_VERSION = \"dom-v2\"", self.collector)
+        self.assertIn("def discover_sections", self.collector)
+        self.assertIn("aria-controls", self.collector)
+        self.assertIn("' item '", self.collector)
+        self.assertIn("def validate_detail_response", self.collector)
+        self.assertIn("parse_status", self.collector)
+        self.assertIn("fail-on-parse-error-rate", self.collector)
+        self.assertNotIn("if not section_summaries:", self.collector)
+
+    def test_workflow_installs_navii_dependencies_and_runs_quality_gate(self) -> None:
+        self.assertIn("Install Navii collector dependencies", self.workflow)
+        self.assertIn("python3 -m pip install --disable-pip-version-check lxml", self.workflow)
+        self.assertIn("collectors/navii_detail/quality_gate.py", self.workflow)
+        self.assertIn("quality-status.json", self.workflow)
+        self.assertIn("aggregate Navii concurrency must be <= 8", self.workflow)
+        self.assertIn('"max_parallel": "4"', self.workflow)
+        self.assertIn("fail_on_parse_error_rate:", self.workflow)
 
 
 if __name__ == "__main__":

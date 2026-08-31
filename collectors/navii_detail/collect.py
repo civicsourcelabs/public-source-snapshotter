@@ -14,6 +14,7 @@ import argparse
 import concurrent.futures
 import csv
 import gzip
+import hashlib
 import html
 import json
 import os
@@ -31,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 OPEN_DATA_FILE_TEMPLATES = {
@@ -62,6 +63,8 @@ TRANSPARENT_USER_AGENT_POOL = (
     "Mozilla/5.0 (compatible; CivicSourceSnapshotter source snapshot worker; owner-approved-public-source-snapshot)",
     "Mozilla/5.0 (compatible; CivicSourceSnapshotter public source research; owner-approved-public-source-snapshot)",
 )
+
+NAVII_PARSER_VERSION = "dom-v2"
 
 TARGET_GROUPS = {
     "personnel": (
@@ -142,6 +145,18 @@ class NaviiCandidate:
     name: str
     address: str
     detail_url: str
+
+
+@dataclass(frozen=True)
+class DetailFetchResponse:
+    html: str
+    status_code: int
+    content_type: str
+    final_url: str
+
+
+class NaviiParseError(ValueError):
+    """Raised when a fetched response cannot satisfy the Navii detail contract."""
 
 
 @dataclass(frozen=True)
@@ -280,7 +295,7 @@ def parse_args() -> argparse.Namespace:
         "--retry-backoff-seconds",
         type=float,
         default=2.0,
-        help="Base retry backoff seconds. Actual backoff grows linearly by attempt.",
+        help="Base retry backoff seconds. Actual backoff doubles on each retry.",
     )
     parser.add_argument(
         "--insecure-skip-tls-verify",
@@ -321,6 +336,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=100.0,
         help="Exit non-zero if fetch error rate is greater than this percent.",
+    )
+    parser.add_argument(
+        "--fail-on-parse-error-rate",
+        type=float,
+        default=0.0,
+        help="Exit non-zero if parse error rate is greater than this percent.",
     )
     parser.add_argument(
         "--progress-every",
@@ -382,10 +403,10 @@ def classify_text(text: str) -> list[str]:
 
 
 def parse_navii_id(navii_id: str) -> tuple[str, str, str]:
-    digits = re.sub(r"\D", "", navii_id or "")
-    if len(digits) < 4:
+    value = (navii_id or "").strip()
+    if len(value) < 4 or not value[:2].isdigit() or not value[2].isdigit():
         return "", "", ""
-    return digits[:2], digits[2:3], digits[3:]
+    return value[:2], value[2:3], value[3:]
 
 
 def build_detail_url(pref_cd: str, kikan_kbn: str, kikan_cd: str) -> str:
@@ -603,6 +624,7 @@ SUMMARY_FIELDNAMES = [
     "address",
     "detail_url",
     "fetch_status",
+    "parse_status",
     "target_group",
     "section_title",
     "section_text_sample",
@@ -683,6 +705,7 @@ PAGE_COVERAGE_FIELDNAMES = [
     "address",
     "detail_url",
     "fetch_status",
+    "parse_status",
     "target_group",
     "has_target_group",
     "has_extractable_table",
@@ -735,7 +758,7 @@ def fetch_detail_html(
     insecure_skip_tls_verify: bool,
     retry_count: int,
     retry_backoff_seconds: float,
-) -> str:
+) -> DetailFetchResponse:
     context = None
     if insecure_skip_tls_verify:
         context = ssl._create_unverified_context()
@@ -754,12 +777,17 @@ def fetch_detail_html(
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds, context=context) as response:
                 charset = response.headers.get_content_charset() or "utf-8"
-                return response.read().decode(charset, errors="replace")
+                return DetailFetchResponse(
+                    html=response.read().decode(charset, errors="replace"),
+                    status_code=int(response.getcode() or 200),
+                    content_type=response.headers.get_content_type() or "",
+                    final_url=response.geturl(),
+                )
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
             last_error = exc
             if attempt >= retry_count or not is_retryable_fetch_error(exc):
                 raise
-            time.sleep(retry_backoff_seconds * (attempt + 1))
+            time.sleep(retry_delay_seconds(retry_backoff_seconds, attempt))
     raise RuntimeError(f"unreachable fetch retry state: {last_error}")
 
 
@@ -775,42 +803,120 @@ def is_retryable_fetch_error(exc: BaseException) -> bool:
     return True
 
 
+def retry_delay_seconds(base_seconds: float, attempt: int) -> float:
+    return base_seconds * (2**attempt)
+
+
+def require_lxml_html() -> Any:
+    try:
+        from lxml import html as lxml_html
+    except ImportError as exc:
+        raise RuntimeError("Navii detail DOM parsing requires lxml. Install lxml in the workflow.") from exc
+    return lxml_html
+
+
+def parse_html_document(page_html: str) -> Any:
+    if not page_html.strip():
+        raise NaviiParseError("empty detail response")
+    lxml_html = require_lxml_html()
+    try:
+        return lxml_html.document_fromstring(page_html)
+    except (TypeError, ValueError) as exc:
+        raise NaviiParseError(f"invalid detail HTML: {type(exc).__name__}") from exc
+
+
+def has_class(element: Any, class_name: str) -> bool:
+    classes = set((element.get("class") or "").split())
+    return class_name in classes
+
+
+def inner_html(element: Any) -> str:
+    lxml_html = require_lxml_html()
+    return "".join(lxml_html.tostring(child, encoding="unicode") for child in element)
+
+
+def element_text(element: Any) -> str:
+    return normalize_text(require_lxml_html().tostring(element, encoding="unicode"))
+
+
+def structure_fingerprint(tree: Any) -> str:
+    """Hash only DOM shape, never page content, for change diagnostics."""
+    shape: list[str] = []
+    for item in tree.xpath("//div[contains(concat(' ', normalize-space(@class), ' '), ' item ')]"):
+        headings = item.xpath("./h2 | ./h3")
+        heading = next((candidate for candidate in headings if has_class(candidate, "heading")), None)
+        if heading is None and headings:
+            heading = headings[0]
+        details = item.xpath("./*[contains(concat(' ', normalize-space(@class), ' '), ' details ')]")
+        details_node = details[0] if details else None
+        heading_tag = heading.tag if heading is not None else "missing"
+        heading_classes = " ".join(sorted((heading.get("class") or "").split())) if heading is not None else ""
+        details_classes = " ".join(sorted((details_node.get("class") or "").split())) if details_node is not None else ""
+        table_count = len(details_node.xpath(".//table")) if details_node is not None else 0
+        shape.append(f"item:{heading_tag}:{heading_classes}:details:{details_classes}:tables:{table_count}")
+    digest = hashlib.sha256("\n".join(shape).encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def discover_sections(page_html: str) -> tuple[Any, list[tuple[str, Any]], str]:
+    tree = parse_html_document(page_html)
+    sections: list[tuple[str, Any]] = []
+    for item in tree.xpath("//div[contains(concat(' ', normalize-space(@class), ' '), ' item ')]"):
+        headings = item.xpath("./h2 | ./h3")
+        heading = next((candidate for candidate in headings if has_class(candidate, "heading")), None)
+        if heading is None and headings:
+            heading = headings[0]
+        if heading is None:
+            continue
+
+        details_id = (heading.get("aria-controls") or "").strip().lstrip("#")
+        details: list[Any] = []
+        if details_id:
+            details = item.xpath(".//*[@id=$details_id]", details_id=details_id)
+        if not details:
+            details = item.xpath(".//*[contains(concat(' ', normalize-space(@class), ' '), ' details ')]")
+        if not details:
+            continue
+
+        title = element_text(heading)
+        if title:
+            sections.append((title, details[0]))
+
+    if not sections:
+        item_count = len(tree.xpath("//div[contains(concat(' ', normalize-space(@class), ' '), ' item ')]"))
+        raise NaviiParseError(
+            f"no target sections found; item_count={item_count}; parser={NAVII_PARSER_VERSION}"
+        )
+    return tree, sections, structure_fingerprint(tree)
+
+
 def iter_section_html(page_html: str) -> Iterable[tuple[str, str]]:
-    item_pattern = re.compile(
-        r'<div class="item">\s*<h3[^>]*>.*?<div>(?P<title>.*?)</div>.*?</h3>\s*'
-        r'<div class="details[^"]*"[^>]*>(?P<body>.*?)</div><!-- /\.\s*details -->',
-        flags=re.S,
-    )
-    for match in item_pattern.finditer(page_html):
-        title = normalize_text(match.group("title"))
-        body = match.group("body")
-        yield title, body
+    _, sections, _ = discover_sections(page_html)
+    for title, details in sections:
+        yield title, inner_html(details)
 
 
-def extract_tables(section_title: str, body_html: str) -> list[SectionTable]:
+def parse_fragment(fragment: str) -> Any:
+    lxml_html = require_lxml_html()
+    return lxml_html.fragment_fromstring(fragment, create_parent="div")
+
+
+def extract_tables_from_element(section_title: str, details: Any) -> list[SectionTable]:
     tables: list[SectionTable] = []
-    for table_index, table_match in enumerate(
-        re.finditer(r"<table\b[^>]*>(.*?)</table>", body_html, flags=re.S | re.I),
-        start=1,
-    ):
-        table_html = table_match.group(1)
+    for table_index, table in enumerate(details.xpath(".//table"), start=1):
         rows: list[list[str]] = []
-        for tr_match in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", table_html, flags=re.S | re.I):
-            tr_html = tr_match.group(1)
-            cells = [
-                normalize_text(cell_match.group(2))
-                for cell_match in re.finditer(
-                    r"<(th|td)\b[^>]*>(.*?)</\1>",
-                    tr_html,
-                    flags=re.S | re.I,
-                )
-            ]
+        for row in table.xpath(".//tr"):
+            cells = [element_text(cell) for cell in row.xpath("./th | ./td")]
             cells = [cell for cell in cells if cell]
             if cells:
                 rows.append(cells)
         if rows:
             tables.append(SectionTable(section_title=section_title, table_index=table_index, rows=rows))
     return tables
+
+
+def extract_tables(section_title: str, body_html: str) -> list[SectionTable]:
+    return extract_tables_from_element(section_title, parse_fragment(body_html))
 
 
 def extract_href(anchor_attrs: str) -> str:
@@ -830,34 +936,31 @@ def extract_links(
     body_html: str,
     page_url: str,
 ) -> list[dict[str, str]]:
+    return extract_links_from_element(
+        section_title=section_title,
+        details=parse_fragment(body_html),
+        page_url=page_url,
+    )
+
+
+def extract_links_from_element(
+    *,
+    section_title: str,
+    details: Any,
+    page_url: str,
+) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
-    for table_index, table_match in enumerate(
-        re.finditer(r"<table\b[^>]*>(.*?)</table>", body_html, flags=re.S | re.I),
-        start=1,
-    ):
-        table_html = table_match.group(1)
-        for row_number, tr_match in enumerate(
-            re.finditer(r"<tr\b[^>]*>(.*?)</tr>", table_html, flags=re.S | re.I),
-            start=1,
-        ):
-            tr_html = tr_match.group(1)
-            cell_matches = list(
-                re.finditer(r"<(th|td)\b[^>]*>(.*?)</\1>", tr_html, flags=re.S | re.I)
-            )
-            cells = [normalize_text(cell_match.group(2)) for cell_match in cell_matches]
+    for table_index, table in enumerate(details.xpath(".//table"), start=1):
+        for row_number, row in enumerate(table.xpath(".//tr"), start=1):
+            cells = [element_text(cell) for cell in row.xpath("./th | ./td")]
             row_label = next((cell for cell in cells if cell), "")
             raw_row_joined = " | ".join(cell for cell in cells if cell)
-            for cell_index, cell_match in enumerate(cell_matches, start=1):
-                cell_html = cell_match.group(2)
-                for anchor_match in re.finditer(
-                    r"<a\b(?P<attrs>[^>]*)>(?P<body>.*?)</a>",
-                    cell_html,
-                    flags=re.S | re.I,
-                ):
-                    href_raw = extract_href(anchor_match.group("attrs"))
+            for cell_index, cell in enumerate(row.xpath("./th | ./td"), start=1):
+                for anchor in cell.xpath(".//a[@href]"):
+                    href_raw = html.unescape(anchor.get("href") or "")
                     if not href_raw:
                         continue
-                    link_text = normalize_text(anchor_match.group("body"))
+                    link_text = element_text(anchor)
                     links.append(
                         {
                             "target_group": ALL_DETAIL_GROUP,
@@ -960,21 +1063,81 @@ def extract_phone_rows(
     return rows
 
 
+def validate_detail_response(response: DetailFetchResponse, candidate: NaviiCandidate) -> None:
+    if not 200 <= response.status_code < 300:
+        raise NaviiParseError(f"unexpected detail response status={response.status_code}")
+    if response.content_type and response.content_type not in {"text/html", "application/xhtml+xml"}:
+        raise NaviiParseError(f"unexpected detail content type={response.content_type}")
+
+    expected_query = urllib.parse.parse_qs(urllib.parse.urlparse(candidate.detail_url).query)
+    final_query = urllib.parse.parse_qs(urllib.parse.urlparse(response.final_url).query)
+    for key, expected in (
+        ("prefCd", candidate.pref_cd),
+        ("kikanKbn", candidate.kikan_kbn),
+        ("kikanCd", candidate.kikan_cd),
+    ):
+        requested_values = expected_query.get(key, [])
+        final_values = final_query.get(key, [])
+        if requested_values and requested_values[0] != expected:
+            raise NaviiParseError(f"candidate URL identity mismatch for {key}")
+        if final_values and final_values[0] != expected:
+            raise NaviiParseError(f"redirected URL identity mismatch for {key}")
+
+
+def parse_error_reason(error: str) -> str:
+    if error.startswith("no target sections found"):
+        return "no_target_sections"
+    if error.startswith("no extractable table rows"):
+        return "no_extractable_table_rows"
+    if error.startswith("empty detail response"):
+        return "empty_response"
+    if error.startswith("invalid detail HTML"):
+        return "invalid_html"
+    if error.startswith("unexpected detail content type"):
+        return "unexpected_content_type"
+    if "identity mismatch" in error:
+        return "identity_mismatch"
+    return "parse_error"
+
+
 def analyze_detail(
     page_html: str,
     *,
     page_url: str = "",
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    summary_rows, table_rows, phone_rows, link_rows, _ = analyze_detail_result(
+        page_html,
+        page_url=page_url,
+    )
+    return summary_rows, table_rows, phone_rows, link_rows
+
+
+def analyze_detail_result(
+    page_html: str,
+    *,
+    page_url: str = "",
+) -> tuple[
+    list[dict[str, str]],
+    list[dict[str, str]],
+    list[dict[str, str]],
+    list[dict[str, str]],
+    str,
+]:
     summary_rows: list[dict[str, str]] = []
     table_rows: list[dict[str, str]] = []
     phone_rows: list[dict[str, str]] = []
     link_rows: list[dict[str, str]] = []
 
-    for section_title, body_html in iter_section_html(page_html):
-        section_text = f"{section_title} {html_to_text(body_html)}"
-        tables = extract_tables(section_title, body_html)
+    _, sections, fingerprint = discover_sections(page_html)
+    for section_title, details in sections:
+        section_text = f"{section_title} {element_text(details)}"
+        tables = extract_tables_from_element(section_title, details)
         link_rows.extend(
-            extract_links(section_title=section_title, body_html=body_html, page_url=page_url)
+            extract_links_from_element(
+                section_title=section_title,
+                details=details,
+                page_url=page_url,
+            )
         )
         summary_rows.append(
             {
@@ -1021,7 +1184,7 @@ def analyze_detail(
                 }
             )
 
-    return summary_rows, table_rows, phone_rows, link_rows
+    return summary_rows, table_rows, phone_rows, link_rows, fingerprint
 
 
 def write_summary(path: Path, rows: list[dict[str, str]]) -> None:
@@ -1234,6 +1397,7 @@ def run_self_test() -> None:
             detail_url="https://example.test",
         ),
         "ok",
+        "ok",
         "",
         summary,
         tables,
@@ -1263,12 +1427,49 @@ def run_self_test() -> None:
         row["target_group"] == "personnel" and int(row["table_row_count"]) > 0
         for row in coverage_summary
     ), coverage_summary
+
+    current_dom_sample = """
+    <div class="item">
+      <h2 class="heading acHeading" aria-controls="acPnl-current-1">医療機関の人員配置</h2>
+      <div class="details" id="acPnl-current-1">
+        <table><tbody>
+          <tr><th>職種</th><th>総数</th></tr>
+          <tr><th>医師</th><td>3</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+    <div class="item">
+      <h2 class="heading acHeading" aria-controls="acPnl-current-2">電話番号</h2>
+      <div id="acPnl-current-2" class="details">
+        <table>
+          <tr><th>予約用電話番号</th><td><a href="tel:03-1234-5678">03-1234-5678</a></td></tr>
+          <tr><th>案内用ホームページアドレス</th><td><a href="/current/">公式サイト</a></td></tr>
+        </table>
+      </div>
+    </div>
+    """
+    current_summary, current_tables, current_phones, current_links = analyze_detail(
+        current_dom_sample,
+        page_url="https://example.test/current/",
+    )
+    assert len(current_tables) == 4, current_tables
+    assert current_phones[0]["phone_number_normalized"] == "0312345678", current_phones
+    assert any(row["link_href_resolved"] == "https://example.test/current/" for row in current_links)
+    assert {row["target_group"] for row in current_summary} >= {ALL_DETAIL_GROUP, "personnel", "phone_contact"}
+
+    try:
+        analyze_detail("<html><body><div class='item'><h2>未知の構造</h2></div></body></html>")
+    except NaviiParseError:
+        pass
+    else:
+        raise AssertionError("unknown Navii DOM must fail closed")
     print("navii_detail collector self-test passed")
 
 
 def build_page_coverage_rows(
     candidate: NaviiCandidate,
     fetch_status: str,
+    parse_status: str,
     error: str,
     section_summaries: list[dict[str, str]],
     section_tables: list[dict[str, str]],
@@ -1301,6 +1502,7 @@ def build_page_coverage_rows(
             {
                 **candidate.__dict__,
                 "fetch_status": fetch_status,
+                "parse_status": parse_status,
                 "target_group": target_group,
                 "has_target_group": "true" if section_count else "false",
                 "has_extractable_table": "true" if extractable_counts[target_group] else "false",
@@ -1320,7 +1522,7 @@ def process_candidate(
     args: argparse.Namespace,
 ) -> dict[str, object]:
     try:
-        page_html = fetch_detail_html(
+        response = fetch_detail_html(
             candidate.detail_url,
             user_agent=args.user_agent,
             user_agent_mode=args.user_agent_mode,
@@ -1330,29 +1532,27 @@ def process_candidate(
             retry_count=args.retry_count,
             retry_backoff_seconds=args.retry_backoff_seconds,
         )
-        section_summaries, section_tables, phone_numbers, links = analyze_detail(
-            page_html,
+        validate_detail_response(response, candidate)
+        section_summaries, section_tables, phone_numbers, links, fingerprint = analyze_detail_result(
+            response.html,
             page_url=candidate.detail_url,
         )
+        if not section_tables:
+            raise NaviiParseError("no extractable table rows found")
         summary_rows: list[dict[str, str]] = []
         table_rows: list[dict[str, str]] = []
         phone_rows: list[dict[str, str]] = []
         link_rows: list[dict[str, str]] = []
-        if not section_summaries:
+        for row in section_summaries:
             summary_rows.append(
                 {
                     **candidate.__dict__,
                     "fetch_status": "ok",
-                    "target_group": "",
-                    "section_title": "",
-                    "section_text_sample": "",
-                    "table_count": "0",
-                    "has_extractable_table": "false",
-                    "error": "no target sections found",
+                    "parse_status": "ok",
+                    "error": "",
+                    **row,
                 }
             )
-        for row in section_summaries:
-            summary_rows.append({**candidate.__dict__, "fetch_status": "ok", "error": "", **row})
         for row in section_tables:
             table_rows.append({**candidate.__dict__, **row})
         for row in phone_numbers:
@@ -1360,24 +1560,35 @@ def process_candidate(
         for row in links:
             link_rows.append({**candidate.__dict__, **row})
         page_coverage_rows = build_page_coverage_rows(
-            candidate, "ok", "", section_summaries, section_tables
+            candidate, "ok", "ok", "", section_summaries, section_tables
         )
         return {
             "index": index,
             "candidate": candidate,
             "fetch_status": "ok",
+            "parse_status": "ok",
+            "parse_error_reason": "",
+            "error": "",
+            "section_count": sum(
+                1 for row in section_summaries if row["target_group"] == ALL_DETAIL_GROUP
+            ),
+            "table_row_count": len(section_tables),
+            "link_row_count": len(link_rows),
+            "phone_number_row_count": len(phone_rows),
+            "structure_fingerprint": fingerprint,
             "summary_rows": summary_rows,
             "table_rows": table_rows,
             "phone_rows": phone_rows,
             "link_rows": link_rows,
             "page_coverage_rows": page_coverage_rows,
         }
-    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
+    except NaviiParseError as exc:
         error = str(exc)
         summary_rows = [
             {
                 **candidate.__dict__,
-                "fetch_status": "error",
+                "fetch_status": "ok",
+                "parse_status": "error",
                 "target_group": "",
                 "section_title": "",
                 "section_text_sample": "",
@@ -1386,11 +1597,57 @@ def process_candidate(
                 "error": error,
             }
         ]
-        page_coverage_rows = build_page_coverage_rows(candidate, "error", error, [], [])
+        page_coverage_rows = build_page_coverage_rows(
+            candidate, "ok", "error", error, [], []
+        )
+        return {
+            "index": index,
+            "candidate": candidate,
+            "fetch_status": "ok",
+            "parse_status": "error",
+            "parse_error_reason": parse_error_reason(error),
+            "error": error,
+            "section_count": 0,
+            "table_row_count": 0,
+            "link_row_count": 0,
+            "phone_number_row_count": 0,
+            "structure_fingerprint": "",
+            "summary_rows": summary_rows,
+            "table_rows": [],
+            "phone_rows": [],
+            "link_rows": [],
+            "page_coverage_rows": page_coverage_rows,
+        }
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
+        error = str(exc)
+        summary_rows = [
+            {
+                **candidate.__dict__,
+                "fetch_status": "error",
+                "parse_status": "not_run",
+                "target_group": "",
+                "section_title": "",
+                "section_text_sample": "",
+                "table_count": "0",
+                "has_extractable_table": "false",
+                "error": error,
+            }
+        ]
+        page_coverage_rows = build_page_coverage_rows(
+            candidate, "error", "not_run", error, [], []
+        )
         return {
             "index": index,
             "candidate": candidate,
             "fetch_status": "error",
+            "parse_status": "not_run",
+            "parse_error_reason": "",
+            "error": error,
+            "section_count": 0,
+            "table_row_count": 0,
+            "link_row_count": 0,
+            "phone_number_row_count": 0,
+            "structure_fingerprint": "",
             "summary_rows": summary_rows,
             "table_rows": [],
             "phone_rows": [],
@@ -1416,7 +1673,7 @@ def ensure_required_args(args: argparse.Namespace) -> None:
 def completed_navii_ids_from_page_coverage(path: Path) -> set[str]:
     completed: dict[str, set[str]] = defaultdict(set)
     for row in iter_csv_rows(path):
-        if row.get("fetch_status") == "ok":
+        if row.get("fetch_status") == "ok" and row.get("parse_status", "ok") == "ok":
             completed[row.get("navii_id", "")].add(row.get("target_group", ""))
     expected_groups = set(TARGET_GROUPS)
     return {
@@ -1512,6 +1769,8 @@ def main() -> int:
         metrics = {
             "schema_version": "1.0",
             "status": "dry_run",
+            "quality_status": "not_applicable",
+            "parser_version": NAVII_PARSER_VERSION,
             "source_id": args.source_id,
             "source_snapshot_date": args.source_snapshot_date,
             "run_label": args.run_label,
@@ -1587,6 +1846,8 @@ def main() -> int:
 
     coverage_counters: dict[tuple[str, str, str], Counter[str]] = defaultdict(Counter)
     counts = Counter()
+    kind_metrics: dict[str, Counter[str]] = defaultdict(Counter)
+    kind_fingerprints: dict[str, set[str]] = defaultdict(set)
 
     summary_handle, summary_writer = csv_writer(
         next(path for path, fields in write_paths.items() if fields is SUMMARY_FIELDNAMES),
@@ -1678,7 +1939,25 @@ def main() -> int:
                 counts["link_rows"] += len(link_rows)
                 counts["phone_number_rows"] += len(phone_rows)
                 counts["page_coverage_rows"] += len(page_coverage_rows)
+                counts["section_count"] += int(result["section_count"])
                 counts[f"fetch_{result['fetch_status']}"] += 1
+                counts[f"parse_{result['parse_status']}"] += 1
+                result_candidate = result["candidate"]
+                assert isinstance(result_candidate, NaviiCandidate)
+                kind_counter = kind_metrics[result_candidate.source_kind]
+                kind_counter["candidate_count"] += 1
+                kind_counter[f"fetch_{result['fetch_status']}_count"] += 1
+                kind_counter[f"parse_{result['parse_status']}_count"] += 1
+                kind_counter["section_count"] += int(result["section_count"])
+                kind_counter["table_row_count"] += int(result["table_row_count"])
+                kind_counter["link_row_count"] += int(result["link_row_count"])
+                kind_counter["phone_number_row_count"] += int(result["phone_number_row_count"])
+                parse_reason = str(result["parse_error_reason"] or "")
+                if parse_reason:
+                    kind_counter[f"parse_error_reason:{parse_reason}"] += 1
+                fingerprint = str(result["structure_fingerprint"] or "")
+                if fingerprint:
+                    kind_fingerprints[result_candidate.source_kind].add(fingerprint)
 
                 if args.progress_every > 0 and completed_count % args.progress_every == 0:
                     print(
@@ -1713,10 +1992,54 @@ def main() -> int:
     total_fetch_count = counts["fetch_ok"] + counts["fetch_error"]
     fetch_error_rate = (counts["fetch_error"] / total_fetch_count) if total_fetch_count else 0.0
     fetch_error_rate_percent = fetch_error_rate * 100
+    parse_attempt_count = counts["parse_ok"] + counts["parse_error"]
+    parse_error_rate = (counts["parse_error"] / parse_attempt_count) if parse_attempt_count else 0.0
+    parse_error_rate_percent = parse_error_rate * 100
+    quality_failures: list[str] = []
+    if fetch_error_rate_percent > args.fail_on_fetch_error_rate:
+        quality_failures.append(
+            f"fetch_error_rate {fetch_error_rate_percent:.2f}% exceeded {args.fail_on_fetch_error_rate:.2f}%"
+        )
+    if parse_error_rate_percent > args.fail_on_parse_error_rate:
+        quality_failures.append(
+            f"parse_error_rate {parse_error_rate_percent:.2f}% exceeded {args.fail_on_parse_error_rate:.2f}%"
+        )
+    if counts["parse_ok"] and counts["table_rows"] == 0:
+        quality_failures.append("no extractable table rows after successful parsing")
+    serialized_kind_metrics = {
+        kind: {
+            **{
+                key: int(counter.get(key, 0))
+                for key in (
+                    "candidate_count",
+                    "fetch_ok_count",
+                    "fetch_error_count",
+                    "parse_ok_count",
+                    "parse_error_count",
+                    "section_count",
+                    "table_row_count",
+                    "link_row_count",
+                    "phone_number_row_count",
+                    "unknown_count",
+                    "fallback_count",
+                )
+            },
+            "structure_fingerprints": sorted(kind_fingerprints.get(kind, set())),
+            "parse_error_reasons": {
+                key.split(":", 1)[1]: int(value)
+                for key, value in counter.items()
+                if key.startswith("parse_error_reason:")
+            },
+        }
+        for kind, counter in sorted(kind_metrics.items())
+    }
     completed_at = utc_now_iso()
     metrics = {
         "schema_version": "1.0",
         "status": "executed",
+        "quality_status": "fail" if quality_failures else "pass",
+        "quality_failures": quality_failures,
+        "parser_version": NAVII_PARSER_VERSION,
         "source_id": args.source_id,
         "source_snapshot_date": args.source_snapshot_date,
         "run_label": args.run_label,
@@ -1737,13 +2060,19 @@ def main() -> int:
         "fetch_error_count": counts["fetch_error"],
         "fetch_error_rate": round(fetch_error_rate, 6),
         "fetch_error_rate_percent": round(fetch_error_rate_percent, 4),
+        "parse_ok_count": counts["parse_ok"],
+        "parse_error_count": counts["parse_error"],
+        "parse_error_rate": round(parse_error_rate, 6),
+        "parse_error_rate_percent": round(parse_error_rate_percent, 4),
         "started_at": started_at,
         "completed_at": completed_at,
         "summary_rows": counts["summary_rows"],
+        "section_count": counts["section_count"],
         "table_rows": counts["table_rows"],
         "link_rows": counts["link_rows"],
         "phone_number_rows": counts["phone_number_rows"],
         "page_coverage_rows": counts["page_coverage_rows"],
+        "kind_metrics": serialized_kind_metrics,
         "candidates": str(candidates_path),
         "summary": str(summary_path),
         "tables": str(tables_path),
@@ -1758,11 +2087,8 @@ def main() -> int:
         encoding="utf-8",
     )
     print(metrics)
-    if fetch_error_rate_percent > args.fail_on_fetch_error_rate:
-        print(
-            f"Fetch error rate {fetch_error_rate_percent:.2f}% exceeded threshold {args.fail_on_fetch_error_rate:.2f}%",
-            file=sys.stderr,
-        )
+    if quality_failures:
+        print("Navii detail quality gate failed: " + "; ".join(quality_failures), file=sys.stderr)
         return 2
     return 0
 

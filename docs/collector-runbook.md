@@ -18,7 +18,7 @@ MHLW monthly collectorとNavii detail collectorは、後続consumerが使う前�
 | workflow | schedule | effective config |
 | --- | --- | --- |
 | `Source Snapshot: MHLW Monthly` | 毎月5日 07:00 JST / 毎月8日 07:00 JST | `execute=true`、`artifact_mode=encrypted_full`、`max_sources=0`、`source_manifest=sources/mhlw_monthly/source-manifest.json` |
-| `Source Snapshot: Navii Detail` | 毎月5日 00:30 JST | `execute=true`、`artifact_mode=encrypted_full`、`candidate_mode=all`、`shard_count=16`、`max_parallel=16`、`max_pages_per_shard=0`、`artifact_retention_days=14` |
+| `Source Snapshot: Navii Detail` | 毎月5日 00:30 JST | `execute=true`、`artifact_mode=encrypted_full`、`candidate_mode=all`、`shard_count=16`、`max_parallel=4`、`workers=2`、`max_pages_per_shard=0`、`artifact_retention_days=14` |
 
 MHLW monthly runでは、schedule / manualともに公式ページで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しい共通snapshotを選び、`source_snapshot_date` とrun labelへ記録します。公開がまだ実行月に追いついていなくても、実行月を日付として仮定しません。後続consumerは選択済み日付をmanifestから引き継ぎます。public repo側の5日runが失敗した場合は8日runで同じ選択規則により再生成します。
 
@@ -100,6 +100,8 @@ collector実装追加とcanary成功は別です。canary結果を確認する�
 - 暗号化前の `*.tar.zst` やraw CSV / JSONL / HTMLがGitHub artifactへ残っていない
 - 復号済みartifactに `table-rows.csv.gz`、`links.csv.gz`、`phone-numbers.csv.gz` がある
 - `coverage-summary.csv.gz` に `target_group=all_detail` がある
+- `quality-status.json` の `quality_status` が `pass` である
+- canaryでは4種別各25件以上が対象で、種別別のsection/table/link/phone抽出が0件でない
 
 TLS certificate verificationだけが失敗する場合に限り、owner判断で `insecure_skip_tls_verify=true` を使います。通常runでは `false` のままにします。
 
@@ -135,6 +137,8 @@ TLS certificate verificationだけが失敗する場合に限り、owner判断�
 - 復号済みartifactに `table-rows.csv.gz`、`links.csv.gz`、`phone-numbers.csv.gz`、`run-metrics.json` がある
 - `run-metrics.json` に `table_rows` と `link_rows` が記録されている
 - `coverage-summary.csv.gz` に `target_group=all_detail` がある
+- `quality-status.json` の `quality_status` が `pass` である
+- canaryがpassするまでfull runとconsumer DB loadへ進まない
 
 ## Navii Detail Full Run
 
@@ -151,7 +155,7 @@ manual full runは、schedule失敗時の再生成、manifest更新直後の確�
 | `sample_per_kind` | `25` |
 | `sample_strategy` | `prefecture-stratified` |
 | `shard_count` | `16` |
-| `max_parallel` | `16` |
+| `max_parallel` | `4` |
 | `workers` | `2` |
 | `pause_seconds` | `0.3` |
 | `jitter_seconds` | `0.1` |
@@ -161,10 +165,12 @@ manual full runは、schedule失敗時の再生成、manifest更新直後の確�
 schedule runの期待値:
 
 - `Validate inputs` stepで `execute=true`、`artifact_mode=encrypted_full`、`shard_count=16`、`max_pages_per_shard=0` になっている
+- `max_parallel * workers` が8以下で、aggregate concurrency guardを通過している
 - `Validate inputs` stepで公式open data pageから実行時点以前の最新snapshot dateを解決し、`run_label=collector-navii-detail-YYYYMMDD-full` になっている
 - `Package handoff artifact` stepで `encrypted/raw-artifacts-shard-*.tar.zst.age` だけがfull artifactとして含まれ、暗号化前の `*.tar.zst` やraw CSV / JSONL / HTMLが残らない
 - `Upload handoff package` のartifact名が `navii-detail-handoff-collector-navii-detail-YYYYMMDD-full-<github_run_id>` になる
 - consumer scheduleの前にrunが `success` で完了している
+- `quality-status.json` の `quality_status` が `pass` である
 
 schedule失敗時の復旧:
 
@@ -246,6 +252,7 @@ schedule失敗時の復旧:
 - `manifest/collector-run-manifest.json`
 - `metrics/fetch-metrics.json`
 - `metrics/shard-summary.json`
+- `metrics/quality-status.json`
 - `metrics/coverage-summary.csv`
 - `metrics/mhlw-source-file-inventory.csv` (MHLW monthly)
 - `metrics/source-coverage-summary.csv` (MHLW monthly)
