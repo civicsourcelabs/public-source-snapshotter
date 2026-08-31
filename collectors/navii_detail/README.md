@@ -63,7 +63,9 @@ public search page. A single exact match is fetched and recorded as
 `search_resolved`; zero, multiple, or mismatched matches are recorded as
 `unresolved`. Search-resolved candidates are emitted to
 `proposed-detail-url-overrides.json` for later review and normal PR promotion;
-the workflow never commits or pushes this file automatically.
+each proposal retains the failed `previous_detail_url` alongside the resolved
+`detail_url`, matched facility identity, reason, and verification date. The
+workflow never commits or pushes this file automatically.
 
 For the single-workflow full run, the preflight uses
 `--sample-candidates --sample-fraction 0.001` with the same shard and fetch

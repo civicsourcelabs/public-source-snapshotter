@@ -91,6 +91,11 @@ unknown / fallbackが0件、section/table/link/phoneの抽出が各種別で0件
 unresolvedは全体1.0%以下なら許容します。unresolved行は公式source行を保持し、
 Navii専用のdetail URL・table・link・phone出力を空欄または未出力にします。
 
+`*-proposed-detail-url-overrides.json` がある場合、各提案には失敗した
+`previous_detail_url`、厳密検索で解決した`detail_url`、source ID、施設名、所在地、
+理由、検証日、検索結果の識別子が含まれます。これはcanonical mapへ昇格する前の
+監査用であり、raw HTMLやsession情報は含みません。
+
 ## Full-run preflight audit
 
 full相当のsingle workflowでは、full shard matrixの前に同じ16シェアmatrixで

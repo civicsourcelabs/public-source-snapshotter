@@ -344,6 +344,7 @@ class NaviiDetailParserTest(unittest.TestCase):
         self.assertEqual(result["resolution_status"], "search_resolved")
         self.assertEqual(result["candidate"].detail_url, match_url)
         self.assertEqual(result["proposed_override"]["kikan_cd"], "2100002055")
+        self.assertIn("kikanCd=1012511471", result["proposed_override"]["previous_detail_url"])
         self.assertEqual(result["parse_status"], "ok")
 
     def test_override_map_rejects_duplicate_or_mismatched_query_identity(self) -> None:

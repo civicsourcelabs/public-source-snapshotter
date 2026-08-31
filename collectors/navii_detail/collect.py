@@ -2032,6 +2032,7 @@ def process_candidate(
         try:
             validate_detail_response(response, request_candidate)
         except NaviiDetailIdentifierNotFound:
+            failed_detail_url = request_candidate.detail_url
             try:
                 match = search_navii_exact(
                     candidate,
@@ -2062,6 +2063,7 @@ def process_candidate(
                 "kikan_cd": match.kikan_cd,
                 "facility_name": candidate.name,
                 "address": candidate.address,
+                "previous_detail_url": failed_detail_url,
                 "reason": "resolved by exact Navii search after detail identifier not found",
                 "verified_at": datetime.now(timezone.utc).date().isoformat(),
                 "detail_url": match.detail_url,
