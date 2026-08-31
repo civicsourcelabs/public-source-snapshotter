@@ -1084,6 +1084,22 @@ def validate_detail_response(response: DetailFetchResponse, candidate: NaviiCand
             raise NaviiParseError(f"redirected URL identity mismatch for {key}")
 
 
+def parse_error_reason(error: str) -> str:
+    if error.startswith("no target sections found"):
+        return "no_target_sections"
+    if error.startswith("no extractable table rows"):
+        return "no_extractable_table_rows"
+    if error.startswith("empty detail response"):
+        return "empty_response"
+    if error.startswith("invalid detail HTML"):
+        return "invalid_html"
+    if error.startswith("unexpected detail content type"):
+        return "unexpected_content_type"
+    if "identity mismatch" in error:
+        return "identity_mismatch"
+    return "parse_error"
+
+
 def analyze_detail(
     page_html: str,
     *,
@@ -1551,6 +1567,7 @@ def process_candidate(
             "candidate": candidate,
             "fetch_status": "ok",
             "parse_status": "ok",
+            "parse_error_reason": "",
             "error": "",
             "section_count": sum(
                 1 for row in section_summaries if row["target_group"] == ALL_DETAIL_GROUP
@@ -1588,6 +1605,7 @@ def process_candidate(
             "candidate": candidate,
             "fetch_status": "ok",
             "parse_status": "error",
+            "parse_error_reason": parse_error_reason(error),
             "error": error,
             "section_count": 0,
             "table_row_count": 0,
@@ -1623,6 +1641,7 @@ def process_candidate(
             "candidate": candidate,
             "fetch_status": "error",
             "parse_status": "not_run",
+            "parse_error_reason": "",
             "error": error,
             "section_count": 0,
             "table_row_count": 0,
@@ -1933,6 +1952,9 @@ def main() -> int:
                 kind_counter["table_row_count"] += int(result["table_row_count"])
                 kind_counter["link_row_count"] += int(result["link_row_count"])
                 kind_counter["phone_number_row_count"] += int(result["phone_number_row_count"])
+                parse_reason = str(result["parse_error_reason"] or "")
+                if parse_reason:
+                    kind_counter[f"parse_error_reason:{parse_reason}"] += 1
                 fingerprint = str(result["structure_fingerprint"] or "")
                 if fingerprint:
                     kind_fingerprints[result_candidate.source_kind].add(fingerprint)
@@ -2003,6 +2025,11 @@ def main() -> int:
                 )
             },
             "structure_fingerprints": sorted(kind_fingerprints.get(kind, set())),
+            "parse_error_reasons": {
+                key.split(":", 1)[1]: int(value)
+                for key, value in kind_counter.items()
+                if key.startswith("parse_error_reason:")
+            },
         }
         for kind, counter in sorted(kind_metrics.items())
     }
