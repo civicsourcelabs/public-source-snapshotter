@@ -625,8 +625,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      INPUT_DIR: ${{ runner.temp }}/preflight-shards
-      AUDIT_DIR: ${{ runner.temp }}/preflight-audit
+      INPUT_DIR: /tmp/navii-detail-preflight-shards
+      AUDIT_DIR: /tmp/navii-detail-preflight-audit
     steps:
       - name: Checkout
         uses: actions/checkout@v6
