@@ -1488,10 +1488,7 @@ def validate_detail_response(response: DetailFetchResponse, candidate: NaviiCand
         raise NaviiParseError(f"unexpected detail response status={response.status_code}")
     if response.content_type and response.content_type not in {"text/html", "application/xhtml+xml"}:
         raise NaviiParseError(f"unexpected detail content type={response.content_type}")
-    if (
-        NAVII_NOT_FOUND_ERROR in response.html
-        and "指定されたデータは存在しません" in response.html
-    ):
+    if NAVII_NOT_FOUND_ERROR in response.html or "指定されたデータは存在しません" in response.html:
         raise NaviiDetailIdentifierNotFound(
             "Navii detail identifier was not found in the current source"
         )
@@ -2055,19 +2052,6 @@ def process_candidate(
             )
             output_candidate = replace(output_candidate, detail_url=match.detail_url)
             navii_detail_status = "search_resolved"
-            proposed_override = {
-                "source_kind": candidate.source_kind,
-                "source_id": candidate.navii_id,
-                "pref_cd": match.pref_cd,
-                "kikan_kbn": match.kikan_kbn,
-                "kikan_cd": match.kikan_cd,
-                "facility_name": candidate.name,
-                "address": candidate.address,
-                "previous_detail_url": failed_detail_url,
-                "reason": "resolved by exact Navii search after detail identifier not found",
-                "verified_at": datetime.now(timezone.utc).date().isoformat(),
-                "detail_url": match.detail_url,
-            }
             response = fetch_detail_html(
                 request_candidate.detail_url,
                 user_agent=args.user_agent,
@@ -2082,6 +2066,19 @@ def process_candidate(
                 validate_detail_response(response, request_candidate)
             except NaviiDetailIdentifierNotFound:
                 return unresolved_result("detail_identifier_not_found_after_exact_search")
+            proposed_override = {
+                "source_kind": candidate.source_kind,
+                "source_id": candidate.navii_id,
+                "pref_cd": match.pref_cd,
+                "kikan_kbn": match.kikan_kbn,
+                "kikan_cd": match.kikan_cd,
+                "facility_name": candidate.name,
+                "address": candidate.address,
+                "previous_detail_url": failed_detail_url,
+                "reason": "resolved by exact Navii search after detail identifier not found",
+                "verified_at": datetime.now(timezone.utc).date().isoformat(),
+                "detail_url": match.detail_url,
+            }
 
         section_summaries, section_tables, phone_numbers, links, fingerprint = analyze_detail_result(
             response.html,

@@ -206,6 +206,28 @@ class NaviiDetailParserTest(unittest.TestCase):
         with self.assertRaises(NaviiDetailIdentifierNotFound):
             validate_detail_response(response, candidate)
 
+    def test_missing_identifier_phrase_without_error_code_is_classified(self) -> None:
+        candidate = NaviiCandidate(
+            source_kind="clinic",
+            product_slug="medical",
+            navii_id="1021012511471",
+            pref_cd="10",
+            kikan_kbn="2",
+            kikan_cd="1012511471",
+            name="いじま内科・消化器内科",
+            address="群馬県太田市飯塚町",
+            detail_url="https://example.test/detail",
+        )
+        response = DetailFetchResponse(
+            html="<html><body>指定されたデータは存在しません。</body></html>",
+            status_code=200,
+            content_type="text/html",
+            final_url=candidate.detail_url,
+        )
+
+        with self.assertRaises(NaviiDetailIdentifierNotFound):
+            validate_detail_response(response, candidate)
+
     def test_override_map_resolves_known_exception_before_derived_url(self) -> None:
         overrides = load_detail_url_overrides()
         candidate = NaviiCandidate(
