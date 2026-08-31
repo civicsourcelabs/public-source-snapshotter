@@ -142,7 +142,7 @@ TLS certificate verificationだけが失敗する場合に限り、owner判断�
 
 ## Navii Detail Full Run
 
-manual full runは、schedule失敗時の再生成、manifest更新直後の確認、またはconsumer artifactを固定したい場合に使います。canaryとowner local decrypt確認が済んでいない状態では実行しません。
+manual full runは、schedule失敗時の再生成、manifest更新直後の確認、またはconsumer artifactを固定したい場合に使います。canaryとowner local decrypt確認が済んでいない状態では実行しません。workflow内でも、16シェアの収集前に4種別各25件の`Preflight canary`を実行し、失敗した場合はfull matrixを開始しません。
 
 推奨input:
 
@@ -171,6 +171,7 @@ schedule runの期待値:
 - `Upload handoff package` のartifact名が `navii-detail-handoff-collector-navii-detail-YYYYMMDD-full-<github_run_id>` になる
 - consumer scheduleの前にrunが `success` で完了している
 - `quality-status.json` の `quality_status` が `pass` である
+- `Preflight canary` が先に成功し、全シェア収集中にparse errorが発生した場合は、そのシェアが候補を全件処理し終わるのを待たずに終了し、matrixの残りのシェアもfail-fastで停止する
 
 schedule失敗時の復旧:
 

@@ -344,6 +344,11 @@ def parse_args() -> argparse.Namespace:
         help="Exit non-zero if parse error rate is greater than this percent.",
     )
     parser.add_argument(
+        "--fail-fast-on-parse-error",
+        action="store_true",
+        help="Stop submitting candidates and fail after the first parse error.",
+    )
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=100,
@@ -1848,6 +1853,7 @@ def main() -> int:
     counts = Counter()
     kind_metrics: dict[str, Counter[str]] = defaultdict(Counter)
     kind_fingerprints: dict[str, set[str]] = defaultdict(set)
+    early_failure_reason = ""
 
     summary_handle, summary_writer = csv_writer(
         next(path for path, fields in write_paths.items() if fields is SUMMARY_FIELDNAMES),
@@ -1899,80 +1905,125 @@ def main() -> int:
                 coverage_counters=coverage_counters,
             )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(args.workers, 1)) as executor:
-            future_to_candidate: dict[concurrent.futures.Future[dict[str, object]], NaviiCandidate] = {}
-            for index, candidate in enumerate(pending_candidates, start=1):
-                future = executor.submit(process_candidate, index=index, candidate=candidate, args=args)
-                future_to_candidate[future] = candidate
-                if index < len(pending_candidates):
-                    delay = args.pause_seconds
-                    if args.jitter_seconds > 0:
-                        delay += random.uniform(0, args.jitter_seconds)
-                    if delay > 0:
-                        time.sleep(delay)
+        def record_result(result: dict[str, object], completed_count: int) -> None:
+            summary_rows = result["summary_rows"]
+            table_rows = result["table_rows"]
+            phone_rows = result["phone_rows"]
+            link_rows = result["link_rows"]
+            page_coverage_rows = result["page_coverage_rows"]
+            assert isinstance(summary_rows, list)
+            assert isinstance(table_rows, list)
+            assert isinstance(phone_rows, list)
+            assert isinstance(link_rows, list)
+            assert isinstance(page_coverage_rows, list)
 
-            for completed_count, future in enumerate(
-                concurrent.futures.as_completed(future_to_candidate),
-                start=1,
-            ):
-                result = future.result()
-                summary_rows = result["summary_rows"]
-                table_rows = result["table_rows"]
-                phone_rows = result["phone_rows"]
-                link_rows = result["link_rows"]
-                page_coverage_rows = result["page_coverage_rows"]
-                assert isinstance(summary_rows, list)
-                assert isinstance(table_rows, list)
-                assert isinstance(phone_rows, list)
-                assert isinstance(link_rows, list)
-                assert isinstance(page_coverage_rows, list)
+            summary_writer.writerows(summary_rows)
+            tables_writer.writerows(table_rows)
+            links_writer.writerows(link_rows)
+            phone_writer.writerows(phone_rows)
+            page_writer.writerows(page_coverage_rows)
+            update_coverage_counters(coverage_counters, page_coverage_rows)
 
-                summary_writer.writerows(summary_rows)
-                tables_writer.writerows(table_rows)
-                links_writer.writerows(link_rows)
-                phone_writer.writerows(phone_rows)
-                page_writer.writerows(page_coverage_rows)
-                update_coverage_counters(coverage_counters, page_coverage_rows)
+            counts["summary_rows"] += len(summary_rows)
+            counts["table_rows"] += len(table_rows)
+            counts["link_rows"] += len(link_rows)
+            counts["phone_number_rows"] += len(phone_rows)
+            counts["page_coverage_rows"] += len(page_coverage_rows)
+            counts["section_count"] += int(result["section_count"])
+            counts[f"fetch_{result['fetch_status']}"] += 1
+            counts[f"parse_{result['parse_status']}"] += 1
+            result_candidate = result["candidate"]
+            assert isinstance(result_candidate, NaviiCandidate)
+            kind_counter = kind_metrics[result_candidate.source_kind]
+            kind_counter["candidate_count"] += 1
+            kind_counter[f"fetch_{result['fetch_status']}_count"] += 1
+            kind_counter[f"parse_{result['parse_status']}_count"] += 1
+            kind_counter["section_count"] += int(result["section_count"])
+            kind_counter["table_row_count"] += int(result["table_row_count"])
+            kind_counter["link_row_count"] += int(result["link_row_count"])
+            kind_counter["phone_number_row_count"] += int(result["phone_number_row_count"])
+            parse_reason = str(result["parse_error_reason"] or "")
+            if parse_reason:
+                kind_counter[f"parse_error_reason:{parse_reason}"] += 1
+            fingerprint = str(result["structure_fingerprint"] or "")
+            if fingerprint:
+                kind_fingerprints[result_candidate.source_kind].add(fingerprint)
 
-                counts["summary_rows"] += len(summary_rows)
-                counts["table_rows"] += len(table_rows)
-                counts["link_rows"] += len(link_rows)
-                counts["phone_number_rows"] += len(phone_rows)
-                counts["page_coverage_rows"] += len(page_coverage_rows)
-                counts["section_count"] += int(result["section_count"])
-                counts[f"fetch_{result['fetch_status']}"] += 1
-                counts[f"parse_{result['parse_status']}"] += 1
-                result_candidate = result["candidate"]
-                assert isinstance(result_candidate, NaviiCandidate)
-                kind_counter = kind_metrics[result_candidate.source_kind]
-                kind_counter["candidate_count"] += 1
-                kind_counter[f"fetch_{result['fetch_status']}_count"] += 1
-                kind_counter[f"parse_{result['parse_status']}_count"] += 1
-                kind_counter["section_count"] += int(result["section_count"])
-                kind_counter["table_row_count"] += int(result["table_row_count"])
-                kind_counter["link_row_count"] += int(result["link_row_count"])
-                kind_counter["phone_number_row_count"] += int(result["phone_number_row_count"])
-                parse_reason = str(result["parse_error_reason"] or "")
-                if parse_reason:
-                    kind_counter[f"parse_error_reason:{parse_reason}"] += 1
-                fingerprint = str(result["structure_fingerprint"] or "")
-                if fingerprint:
-                    kind_fingerprints[result_candidate.source_kind].add(fingerprint)
+            if args.progress_every > 0 and completed_count % args.progress_every == 0:
+                print(
+                    json.dumps(
+                        {
+                            "progress": completed_count,
+                            "submitted_candidate_count": submitted_count,
+                            "pending_candidate_count": len(pending_candidates),
+                            "shard_index": args.shard_index,
+                            "fetch_ok": counts["fetch_ok"],
+                            "fetch_error": counts["fetch_error"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
 
-                if args.progress_every > 0 and completed_count % args.progress_every == 0:
-                    print(
-                        json.dumps(
-                            {
-                                "progress": completed_count,
-                                "pending_candidate_count": len(pending_candidates),
-                                "shard_index": args.shard_index,
-                                "fetch_ok": counts["fetch_ok"],
-                                "fetch_error": counts["fetch_error"],
-                            },
-                            ensure_ascii=False,
-                        ),
-                        file=sys.stderr,
-                    )
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(args.workers, 1))
+        future_to_candidate: dict[concurrent.futures.Future[dict[str, object]], NaviiCandidate] = {}
+        candidate_iterator = iter(enumerate(pending_candidates, start=1))
+        submitted_count = 0
+        completed_count = 0
+        aborted = False
+
+        def submit_next() -> bool:
+            nonlocal submitted_count
+            try:
+                index, candidate = next(candidate_iterator)
+            except StopIteration:
+                return False
+            if submitted_count > 0:
+                delay = args.pause_seconds
+                if args.jitter_seconds > 0:
+                    delay += random.uniform(0, args.jitter_seconds)
+                if delay > 0:
+                    time.sleep(delay)
+            future = executor.submit(process_candidate, index=index, candidate=candidate, args=args)
+            future_to_candidate[future] = candidate
+            submitted_count += 1
+            return True
+
+        try:
+            for _ in range(min(max(args.workers, 1), len(pending_candidates))):
+                submit_next()
+
+            while future_to_candidate:
+                done, _ = concurrent.futures.wait(
+                    future_to_candidate,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    result = future.result()
+                    completed_count += 1
+                    record_result(result, completed_count)
+                    result_candidate = result["candidate"]
+                    assert isinstance(result_candidate, NaviiCandidate)
+                    if args.fail_fast_on_parse_error and result["parse_status"] == "error":
+                        reason = str(result["parse_error_reason"] or "unknown")
+                        early_failure_reason = (
+                            "fail-fast parse error at "
+                            f"{result_candidate.source_kind}/{result_candidate.navii_id} ({reason})"
+                        )
+                        aborted = True
+                        break
+                    del future_to_candidate[future]
+                    submit_next()
+                if aborted:
+                    break
+        except BaseException:
+            aborted = True
+            raise
+        finally:
+            if aborted:
+                for future in future_to_candidate:
+                    future.cancel()
+            executor.shutdown(wait=True, cancel_futures=aborted)
     finally:
         summary_handle.close()
         tables_handle.close()
@@ -1996,6 +2047,8 @@ def main() -> int:
     parse_error_rate = (counts["parse_error"] / parse_attempt_count) if parse_attempt_count else 0.0
     parse_error_rate_percent = parse_error_rate * 100
     quality_failures: list[str] = []
+    if early_failure_reason:
+        quality_failures.append(early_failure_reason)
     if fetch_error_rate_percent > args.fail_on_fetch_error_rate:
         quality_failures.append(
             f"fetch_error_rate {fetch_error_rate_percent:.2f}% exceeded {args.fail_on_fetch_error_rate:.2f}%"
@@ -2056,6 +2109,8 @@ def main() -> int:
         "pause_seconds": args.pause_seconds,
         "jitter_seconds": args.jitter_seconds,
         "retry_count": args.retry_count,
+        "fail_fast_on_parse_error": args.fail_fast_on_parse_error,
+        "early_failure_reason": early_failure_reason,
         "fetch_ok_count": counts["fetch_ok"],
         "fetch_error_count": counts["fetch_error"],
         "fetch_error_rate": round(fetch_error_rate, 6),

@@ -460,16 +460,140 @@ jobs:
           path: ${{ runner.temp }}/source-open-data/
           retention-days: ${{ fromJSON(needs.validate.outputs.artifact_retention_days) }}
 
-  collect:
-    name: "Collect shard ${{ matrix.shard_index }}"
+  preflight-canary:
+    name: "Preflight canary"
     needs:
       - validate
       - prepare-source
     if: needs.validate.outputs.skip_existing != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SOURCE_DIR: /tmp/source-open-data
+      OUT_DIR: /tmp/navii-detail-preflight
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Navii collector dependencies
+        run: python3 -m pip install --disable-pip-version-check lxml
+
+      - name: Download source artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: source-open-data-${{ github.run_id }}
+          path: ${{ env.SOURCE_DIR }}
+
+      - name: Run preflight canary
+        env:
+          EXECUTE: ${{ needs.validate.outputs.execute }}
+          RUN_LABEL: ${{ needs.validate.outputs.run_label }}
+          SOURCE_ID: ${{ needs.validate.outputs.source_id }}
+          SOURCE_SNAPSHOT_DATE: ${{ needs.validate.outputs.source_snapshot_date }}
+          KINDS: ${{ needs.validate.outputs.kinds }}
+          WORKERS: ${{ needs.validate.outputs.workers }}
+          PAUSE_SECONDS: ${{ needs.validate.outputs.pause_seconds }}
+          JITTER_SECONDS: ${{ needs.validate.outputs.jitter_seconds }}
+          TIMEOUT_SECONDS: ${{ needs.validate.outputs.timeout_seconds }}
+          RETRY_COUNT: ${{ needs.validate.outputs.retry_count }}
+          RETRY_BACKOFF_SECONDS: ${{ needs.validate.outputs.retry_backoff_seconds }}
+          INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
+          FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
+          FAIL_ON_PARSE_ERROR_RATE: ${{ needs.validate.outputs.fail_on_parse_error_rate }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          args=(
+            --source-dir "$SOURCE_DIR"
+            --out-dir "$OUT_DIR"
+            --source-id "$SOURCE_ID"
+            --source-snapshot-date "$SOURCE_SNAPSHOT_DATE"
+            --run-label "$RUN_LABEL"
+            --artifact-mode summary_only
+            --kinds "$KINDS"
+            --sample-per-kind 25
+            --sample-strategy prefecture-stratified
+            --sample-candidates
+            --shard-count 1
+            --shard-index 0
+            --max-pages-per-shard 0
+            --workers "$WORKERS"
+            --pause-seconds "$PAUSE_SECONDS"
+            --jitter-seconds "$JITTER_SECONDS"
+            --timeout-seconds "$TIMEOUT_SECONDS"
+            --retry-count "$RETRY_COUNT"
+            --retry-backoff-seconds "$RETRY_BACKOFF_SECONDS"
+            --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
+            --fail-on-parse-error-rate "$FAIL_ON_PARSE_ERROR_RATE"
+            --fail-fast-on-parse-error
+          )
+          if [ "$EXECUTE" = "true" ]; then
+            args+=(--execute)
+          fi
+          if [ "$INSECURE_SKIP_TLS_VERIFY" = "true" ]; then
+            args+=(--insecure-skip-tls-verify)
+          fi
+          python3 collectors/navii_detail/collect.py "${args[@]}"
+
+          if [ "$EXECUTE" = "true" ]; then
+            quality_args=(
+              --metrics-dir "$OUT_DIR"
+              --out "$OUT_DIR/quality-status.json"
+              --execute
+              --candidate-mode sample
+              --sample-per-kind 25
+              --kinds "$KINDS"
+              --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
+            )
+            python3 collectors/navii_detail/quality_gate.py "${quality_args[@]}"
+          fi
+
+      - name: Publish preflight summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f "$OUT_DIR/run-metrics.json" ]; then
+            echo "Preflight metrics were not produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          metrics = json.loads((Path(os.environ["OUT_DIR"]) / "run-metrics.json").read_text(encoding="utf-8"))
+          summary = {
+              "quality_status": metrics.get("quality_status"),
+              "candidate_count": metrics.get("candidate_count"),
+              "fetch_ok_count": metrics.get("fetch_ok_count"),
+              "fetch_error_count": metrics.get("fetch_error_count"),
+              "parse_ok_count": metrics.get("parse_ok_count"),
+              "parse_error_count": metrics.get("parse_error_count"),
+              "early_failure_reason": metrics.get("early_failure_reason", ""),
+          }
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("### Navii preflight canary\n\n")
+              handle.write("```json\n")
+              handle.write(json.dumps(summary, ensure_ascii=False, indent=2))
+              handle.write("\n```\n")
+          PY
+
+  collect:
+    name: "Collect shard ${{ matrix.shard_index }}"
+    needs:
+      - validate
+      - prepare-source
+      - preflight-canary
+    if: needs.validate.outputs.skip_existing != 'true'
+    runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
-      fail-fast: false
+      fail-fast: true
       max-parallel: ${{ fromJSON(needs.validate.outputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
     env:
@@ -540,6 +664,7 @@ jobs:
             --retry-backoff-seconds "$RETRY_BACKOFF_SECONDS"
             --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
             --fail-on-parse-error-rate "$FAIL_ON_PARSE_ERROR_RATE"
+            --fail-fast-on-parse-error
           )
           if [ "$EXECUTE" = "true" ]; then
             args+=(--execute)

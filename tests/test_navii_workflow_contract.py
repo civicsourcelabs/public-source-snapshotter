@@ -57,7 +57,7 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertIn("skip_existing: ${{ steps.plan.outputs.skip_existing }}", self.workflow)
         self.assertEqual(
             self.workflow.count("if: needs.validate.outputs.skip_existing != 'true'"),
-            3,
+            4,
         )
 
     def test_scheduled_run_stays_full_encrypted_snapshot(self) -> None:
@@ -110,6 +110,13 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertIn("aggregate Navii concurrency must be <= 32", self.workflow)
         self.assertIn('"max_parallel": "16"', self.workflow)
         self.assertIn("fail_on_parse_error_rate:", self.workflow)
+        self.assertIn('name: "Preflight canary"', self.workflow)
+        self.assertIn("--sample-per-kind 25", self.workflow)
+        self.assertIn("--fail-fast-on-parse-error", self.workflow)
+        self.assertIn("fail-fast: true", self.workflow)
+        self.assertIn("preflight-canary", self.workflow)
+        self.assertIn("concurrent.futures.wait(", self.collector)
+        self.assertNotIn("concurrent.futures.as_completed(", self.collector)
 
 
 if __name__ == "__main__":
