@@ -22,7 +22,7 @@ MHLW monthly collectorとNavii detail collectorは、後続consumerが使う前�
 
 MHLW monthly runでは、schedule / manualともに公式ページで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しい共通snapshotを選び、`source_snapshot_date` とrun labelへ記録します。公開がまだ実行月に追いついていなくても、実行月を日付として仮定しません。後続consumerは選択済み日付をmanifestから引き継ぎます。public repo側の5日runが失敗した場合は8日runで同じ選択規則により再生成します。
 
-Navii detail runでは、公式open data pageで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しいsnapshotを自動選択します。実行月のsnapshotが未公開でも、利用可能な最新snapshotを選び、その日付をmanifestとrun labelへ記録します。選択したsnapshotの必須linkやdetail取得が失敗した場合はfail closedし、選択後に別の古いsnapshotへfallbackしません。run labelも `collector-navii-detail-YYYYMMDD-{canary|scope|full}` として選択日付から生成します。full相当のrunでは内部preflightのために `-preflight` suffixも使いますが、preflight成果物はhandoffへ使いません。scheduleは毎月5日にreadiness pollとして動きますが、同じsnapshot dateのfull artifactが既に成功していれば後続jobをskipします。
+Navii detail runでは、公式open data pageで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しいsnapshotを自動選択します。実行月のsnapshotが未公開でも、利用可能な最新snapshotを選び、その日付をmanifestとrun labelへ記録します。選択したsnapshotの必須linkやdetail取得が失敗した場合はfail closedし、選択後に別の古いsnapshotへfallbackしません。run labelも `collector-navii-detail-YYYYMMDD-{canary|scope|full}` として選択日付から生成します。full相当のrunでは内部preflightのために `-preflight` suffixも使いますが、preflight成果物はhandoffへ使いません。scheduleは毎月5日にreadiness pollとして動きますが、同じsnapshot dateのfull artifactが既に成功していれば後続jobをskipします。公式IDが現行Navii detail IDと一致しない個別例外は `collectors/navii_detail/detail_url_overrides.json` で先に解決します。既知mapにない `E-0109` は、都道府県・種別・施設名・所在地の厳密検索で一意に解決できた場合だけそのURLを使い、解決できない場合は公式行を残してNavii専用列を空欄にします。未解決率が1.0%を超えた場合、または正常detailページのDOM/抽出が壊れた場合はhandoffを止めます。
 
 ## 初回セットアップ
 
@@ -100,6 +100,8 @@ collector実装追加とcanary成功は別です。canary結果を確認する�
 - 暗号化前の `*.tar.zst` やraw CSV / JSONL / HTMLがGitHub artifactへ残っていない
 - 復号済みartifactに `table-rows.csv.gz`、`links.csv.gz`、`phone-numbers.csv.gz` がある
 - `coverage-summary.csv.gz` に `target_group=all_detail` がある
+- `summary.csv.gz` と `page-coverage.csv.gz` の `navii_detail_status` が解決経路を示し、`unresolved` 行ではNavii専用出力が空欄である
+- `proposed-detail-url-overrides.json` があれば、mapへ昇格する前の厳密検索結果として監査できる
 - `quality-status.json` の `quality_status` が `pass` である
 - canaryでは4種別各25件以上が対象で、種別別のsection/table/link/phone抽出が0件でない
 
@@ -176,6 +178,7 @@ schedule runの期待値:
 - consumer scheduleの前にrunが `success` で完了している
 - `quality-status.json` の `quality_status` が `pass` である
 - preflightまたはfull shardでparse errorが発生した場合は、そのシェアが候補を全件処理し終わるのを待たずに終了し、matrixの残りのシェアもfail-fastで停止する
+- `E-0109` による個別未解決はparse errorではなく、全体未解決率が1.0%以下なら継続する
 
 schedule失敗時の復旧:
 

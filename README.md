@@ -54,6 +54,7 @@ public-source-snapshotter/
   collectors/
     navii_detail/
       README.md
+      detail_url_overrides.json
       collect.py
     mhlw_monthly/
       README.md

@@ -116,6 +116,11 @@ on:
         type: string
         required: true
         default: "0"
+      fail_on_unresolved_rate:
+        description: "Warn/continue for unresolved detail URLs up to this percent"
+        type: string
+        required: true
+        default: "1"
       artifact_retention_days:
         description: "GitHub artifact retention days"
         type: string
@@ -164,6 +169,7 @@ jobs:
       max_pages_per_shard: ${{ steps.plan.outputs.max_pages_per_shard }}
       fail_on_fetch_error_rate: ${{ steps.plan.outputs.fail_on_fetch_error_rate }}
       fail_on_parse_error_rate: ${{ steps.plan.outputs.fail_on_parse_error_rate }}
+      fail_on_unresolved_rate: ${{ steps.plan.outputs.fail_on_unresolved_rate }}
       artifact_retention_days: ${{ steps.plan.outputs.artifact_retention_days }}
     steps:
       - name: Checkout
@@ -194,6 +200,7 @@ jobs:
           MAX_PAGES_PER_SHARD: ${{ inputs.max_pages_per_shard }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ inputs.fail_on_fetch_error_rate }}
           FAIL_ON_PARSE_ERROR_RATE: ${{ inputs.fail_on_parse_error_rate }}
+          FAIL_ON_UNRESOLVED_RATE: ${{ inputs.fail_on_unresolved_rate }}
           ARTIFACT_RETENTION_DAYS: ${{ inputs.artifact_retention_days }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -319,6 +326,7 @@ jobs:
                   "max_pages_per_shard": "0",
                   "fail_on_fetch_error_rate": "5",
                   "fail_on_parse_error_rate": "0",
+                  "fail_on_unresolved_rate": "1",
                   "artifact_retention_days": "14",
               }
               raw_indexes = ""
@@ -345,6 +353,7 @@ jobs:
                   "max_pages_per_shard": value("MAX_PAGES_PER_SHARD", "400"),
                   "fail_on_fetch_error_rate": value("FAIL_ON_FETCH_ERROR_RATE", "5"),
                   "fail_on_parse_error_rate": value("FAIL_ON_PARSE_ERROR_RATE", "0"),
+                  "fail_on_unresolved_rate": value("FAIL_ON_UNRESOLVED_RATE", "1"),
                   "artifact_retention_days": value("ARTIFACT_RETENTION_DAYS", "7"),
               }
               raw_indexes = os.environ.get("SHARD_INDEXES", "").strip()
@@ -375,7 +384,11 @@ jobs:
               raise SystemExit("max_parallel and workers must be >= 1")
           if max_parallel * workers > 32:
               raise SystemExit("aggregate Navii concurrency must be <= 32")
-          for threshold_name in ("fail_on_fetch_error_rate", "fail_on_parse_error_rate"):
+          for threshold_name in (
+              "fail_on_fetch_error_rate",
+              "fail_on_parse_error_rate",
+              "fail_on_unresolved_rate",
+          ):
               threshold = float(resolved[threshold_name])
               if not 0 <= threshold <= 100:
                   raise SystemExit(f"{threshold_name} must be between 0 and 100")
@@ -515,6 +528,7 @@ jobs:
           INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
           FAIL_ON_PARSE_ERROR_RATE: ${{ needs.validate.outputs.fail_on_parse_error_rate }}
+          FAIL_ON_UNRESOLVED_RATE: ${{ needs.validate.outputs.fail_on_unresolved_rate }}
           PREFLIGHT_FRACTION: ${{ env.NAVII_PREFLIGHT_FRACTION }}
         run: |
           set -euo pipefail
@@ -542,6 +556,7 @@ jobs:
             --retry-backoff-seconds "$RETRY_BACKOFF_SECONDS"
             --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
             --fail-on-parse-error-rate "$FAIL_ON_PARSE_ERROR_RATE"
+            --fail-on-unresolved-rate "$FAIL_ON_UNRESOLVED_RATE"
             --fail-fast-on-parse-error
           )
           if [ "$EXECUTE" = "true" ]; then
@@ -568,6 +583,9 @@ jobs:
           fi
           if [ -f "$OUT_DIR/coverage-summary.csv.gz" ]; then
             cp "$OUT_DIR/coverage-summary.csv.gz" "$AUDIT_PACKAGE_DIR/metrics/coverage-summary.csv.gz"
+          fi
+          if [ -f "$OUT_DIR/proposed-detail-url-overrides.json" ]; then
+            cp "$OUT_DIR/proposed-detail-url-overrides.json" "$AUDIT_PACKAGE_DIR/metrics/proposed-detail-url-overrides.json"
           fi
           python3 - <<'PY'
           import json
@@ -662,6 +680,7 @@ jobs:
           INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
           FAIL_ON_PARSE_ERROR_RATE: ${{ needs.validate.outputs.fail_on_parse_error_rate }}
+          FAIL_ON_UNRESOLVED_RATE: ${{ needs.validate.outputs.fail_on_unresolved_rate }}
           PREFLIGHT_FRACTION: ${{ env.NAVII_PREFLIGHT_FRACTION }}
         run: |
           set -euo pipefail
@@ -684,6 +703,7 @@ jobs:
             --sample-per-kind 0
             --kinds "$KINDS"
             --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
+            --fail-on-unresolved-rate "$FAIL_ON_UNRESOLVED_RATE"
           )
           if [ "$EXECUTE" = "true" ]; then
             quality_args+=(--execute)
@@ -783,6 +803,7 @@ jobs:
                   "max_pages_per_shard": int(os.environ["MAX_PAGES_PER_SHARD"]),
                   "fail_on_fetch_error_rate": float(os.environ["FAIL_ON_FETCH_ERROR_RATE"]),
                   "fail_on_parse_error_rate": float(os.environ["FAIL_ON_PARSE_ERROR_RATE"]),
+                  "fail_on_unresolved_rate": float(os.environ["FAIL_ON_UNRESOLVED_RATE"]),
               },
               "full_run_input": "source-open-data plus the same resolved workflow settings; preflight output is not an input",
           }
@@ -866,6 +887,7 @@ jobs:
           INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
           FAIL_ON_PARSE_ERROR_RATE: ${{ needs.validate.outputs.fail_on_parse_error_rate }}
+          FAIL_ON_UNRESOLVED_RATE: ${{ needs.validate.outputs.fail_on_unresolved_rate }}
         run: |
           set -euo pipefail
           mkdir -p "$OUT_DIR"
@@ -890,6 +912,7 @@ jobs:
             --retry-backoff-seconds "$RETRY_BACKOFF_SECONDS"
             --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
             --fail-on-parse-error-rate "$FAIL_ON_PARSE_ERROR_RATE"
+            --fail-on-unresolved-rate "$FAIL_ON_UNRESOLVED_RATE"
             --fail-fast-on-parse-error
           )
           if [ "$EXECUTE" = "true" ]; then
@@ -920,6 +943,9 @@ jobs:
           fi
           if [ -f "$OUT_DIR/coverage-summary.csv.gz" ]; then
             cp "$OUT_DIR/coverage-summary.csv.gz" "$SHARD_PACKAGE_DIR/metrics/coverage-summary.csv.gz"
+          fi
+          if [ -f "$OUT_DIR/proposed-detail-url-overrides.json" ]; then
+            cp "$OUT_DIR/proposed-detail-url-overrides.json" "$SHARD_PACKAGE_DIR/metrics/proposed-detail-url-overrides.json"
           fi
 
           if [ "$ARTIFACT_MODE" = "encrypted_full" ]; then
@@ -980,6 +1006,8 @@ jobs:
           WORKERS: ${{ needs.validate.outputs.workers }}
           KINDS: ${{ needs.validate.outputs.kinds }}
           FAIL_ON_FETCH_ERROR_RATE: ${{ needs.validate.outputs.fail_on_fetch_error_rate }}
+          FAIL_ON_PARSE_ERROR_RATE: ${{ needs.validate.outputs.fail_on_parse_error_rate }}
+          FAIL_ON_UNRESOLVED_RATE: ${{ needs.validate.outputs.fail_on_unresolved_rate }}
           PACKAGE_DIR: ${{ runner.temp }}/package
           SOURCE_MANIFEST_TEMPLATE: sources/navii/source-manifest.json
           INSECURE_SKIP_TLS_VERIFY: ${{ needs.validate.outputs.insecure_skip_tls_verify }}
@@ -1046,6 +1074,7 @@ jobs:
             --sample-per-kind "$SAMPLE_PER_KIND"
             --kinds "$KINDS"
             --fail-on-fetch-error-rate "$FAIL_ON_FETCH_ERROR_RATE"
+            --fail-on-unresolved-rate "$FAIL_ON_UNRESOLVED_RATE"
           )
           if [ "$EXECUTE" = "true" ]; then
             quality_args+=(--execute)

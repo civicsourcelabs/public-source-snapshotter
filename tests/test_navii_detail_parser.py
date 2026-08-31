@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from argparse import Namespace
+from pathlib import Path
+from unittest.mock import patch
 
 from collectors.navii_detail.collect import (
     ALL_DETAIL_GROUP,
     DetailFetchResponse,
     NaviiCandidate,
+    NaviiDetailIdentifierNotFound,
+    NaviiSearchMatch,
+    NaviiSearchError,
     NaviiParseError,
     analyze_detail,
     analyze_detail_result,
+    load_detail_url_overrides,
+    parse_navii_search_matches,
     parse_navii_id,
+    process_candidate,
     retry_delay_seconds,
+    resolve_candidate_url,
     select_candidates,
     validate_detail_response,
 )
@@ -171,6 +183,199 @@ class NaviiDetailParserTest(unittest.TestCase):
 
         with self.assertRaisesRegex(NaviiParseError, "content type"):
             validate_detail_response(response, candidate)
+
+    def test_e0109_is_classified_as_missing_detail_identifier(self) -> None:
+        candidate = NaviiCandidate(
+            source_kind="clinic",
+            product_slug="medical",
+            navii_id="1021012511471",
+            pref_cd="10",
+            kikan_kbn="2",
+            kikan_cd="1012511471",
+            name="いじま内科・消化器内科",
+            address="群馬県太田市飯塚町",
+            detail_url="https://example.test/detail",
+        )
+        response = DetailFetchResponse(
+            html="<html><body>指定されたデータは存在しません。[1012511471](E-0109)</body></html>",
+            status_code=200,
+            content_type="text/html",
+            final_url=candidate.detail_url,
+        )
+
+        with self.assertRaises(NaviiDetailIdentifierNotFound):
+            validate_detail_response(response, candidate)
+
+    def test_override_map_resolves_known_exception_before_derived_url(self) -> None:
+        overrides = load_detail_url_overrides()
+        candidate = NaviiCandidate(
+            source_kind="clinic",
+            product_slug="medical",
+            navii_id="1021012511471",
+            pref_cd="10",
+            kikan_kbn="2",
+            kikan_cd="1012511471",
+            name="いじま内科・消化器内科",
+            address="群馬県太田市飯塚町",
+            detail_url="",
+        )
+
+        resolution = resolve_candidate_url(candidate, overrides)
+
+        self.assertEqual(resolution.status, "override_hit")
+        self.assertIn("2100002055", resolution.request_candidate.detail_url)
+        self.assertIn("1012511471", resolution.derived_url)
+
+    def test_search_result_parser_extracts_identity_and_address(self) -> None:
+        html = """
+        <div class="resultItems"><div class="item">
+          <h2 class="name"><a href="/znk-web/juminkanja/S2430/initialize?prefCd=10&amp;kikanCd=2100002055&amp;kikanKbn=2">
+            いじま内科・消化器内科
+          </a></h2>
+          <dl><div><dt><img alt="住所"></dt><dd><p>〒373-0817 群馬県太田市飯塚町</p></dd></div></dl>
+        </div></div>
+        """
+
+        matches = parse_navii_search_matches(html)
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].name, "いじま内科・消化器内科")
+        self.assertEqual(matches[0].address, "群馬県太田市飯塚町")
+        self.assertEqual(matches[0].kikan_cd, "2100002055")
+
+    def test_unresolved_candidate_keeps_source_fields_and_blanks_navii_fields(self) -> None:
+        candidate = NaviiCandidate(
+            source_kind="clinic",
+            product_slug="medical",
+            navii_id="1021012511471",
+            pref_cd="10",
+            kikan_kbn="2",
+            kikan_cd="1012511471",
+            name="いじま内科・消化器内科",
+            address="群馬県太田市飯塚町",
+            detail_url="https://example.test/detail",
+        )
+        args = Namespace(
+            detail_url_overrides={},
+            user_agent="test",
+            user_agent_mode="fixed",
+            timeout_seconds=1,
+            insecure_skip_tls_verify=False,
+            retry_count=0,
+            retry_backoff_seconds=0,
+        )
+        missing_response = DetailFetchResponse(
+            html="<html><body>指定されたデータは存在しません。(E-0109)</body></html>",
+            status_code=200,
+            content_type="text/html",
+            final_url=candidate.detail_url,
+        )
+
+        with patch(
+            "collectors.navii_detail.collect.fetch_detail_html",
+            return_value=missing_response,
+        ), patch(
+            "collectors.navii_detail.collect.search_navii_exact",
+            side_effect=NaviiSearchError("Navii exact search did not return one matching facility: count=0"),
+        ):
+            result = process_candidate(index=1, candidate=candidate, args=args)
+
+        self.assertEqual(result["resolution_status"], "unresolved")
+        self.assertEqual(result["candidate"].name, candidate.name)
+        self.assertEqual(result["candidate"].detail_url, "")
+        self.assertEqual(result["table_rows"], [])
+        self.assertEqual(result["summary_rows"][0]["navii_detail_status"], "unresolved")
+        self.assertEqual(result["summary_rows"][0]["navii_detail_reason"], "exact_search_no_unique_match")
+
+    def test_search_resolved_candidate_is_proposed_for_map_promotion(self) -> None:
+        candidate = NaviiCandidate(
+            source_kind="clinic",
+            product_slug="medical",
+            navii_id="1021012511471",
+            pref_cd="10",
+            kikan_kbn="2",
+            kikan_cd="1012511471",
+            name="いじま内科・消化器内科",
+            address="群馬県太田市飯塚町",
+            detail_url="https://example.test/detail",
+        )
+        match_url = (
+            "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2430/initialize"
+            "?prefCd=10&kikanKbn=2&kikanCd=2100002055"
+        )
+        args = Namespace(
+            detail_url_overrides={},
+            user_agent="test",
+            user_agent_mode="fixed",
+            timeout_seconds=1,
+            insecure_skip_tls_verify=False,
+            retry_count=0,
+            retry_backoff_seconds=0,
+        )
+        missing_response = DetailFetchResponse(
+            html="<html><body>指定されたデータは存在しません。(E-0109)</body></html>",
+            status_code=200,
+            content_type="text/html",
+            final_url=candidate.detail_url,
+        )
+        valid_response = DetailFetchResponse(
+            html=CURRENT_DOM,
+            status_code=200,
+            content_type="text/html",
+            final_url=match_url,
+        )
+
+        with patch(
+            "collectors.navii_detail.collect.fetch_detail_html",
+            side_effect=[missing_response, valid_response],
+        ), patch(
+            "collectors.navii_detail.collect.search_navii_exact",
+            return_value=NaviiSearchMatch(
+                name=candidate.name,
+                address=candidate.address,
+                pref_cd="10",
+                kikan_kbn="2",
+                kikan_cd="2100002055",
+                detail_url=match_url,
+            ),
+        ):
+            result = process_candidate(index=1, candidate=candidate, args=args)
+
+        self.assertEqual(result["resolution_status"], "search_resolved")
+        self.assertEqual(result["candidate"].detail_url, match_url)
+        self.assertEqual(result["proposed_override"]["kikan_cd"], "2100002055")
+        self.assertEqual(result["parse_status"], "ok")
+
+    def test_override_map_rejects_duplicate_or_mismatched_query_identity(self) -> None:
+        valid = {
+            "source_kind": "clinic",
+            "source_id": "1021012511471",
+            "pref_cd": "10",
+            "kikan_kbn": "2",
+            "kikan_cd": "2100002055",
+            "facility_name": "いじま内科・消化器内科",
+            "address": "群馬県太田市飯塚町",
+            "reason": "fixture",
+            "verified_at": "2026-08-31",
+            "detail_url": "https://www.iryou.teikyouseido.mhlw.go.jp/znk-web/juminkanja/S2430/initialize?prefCd=10&kikanKbn=2&kikanCd=2100002055",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "overrides.json"
+            path.write_text(
+                json.dumps({"schema_version": "1.0", "overrides": [valid, valid]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate detail URL override key"):
+                load_detail_url_overrides(path)
+
+            mismatched = dict(valid)
+            mismatched["kikan_cd"] = "wrong"
+            path.write_text(
+                json.dumps({"schema_version": "1.0", "overrides": [mismatched]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "query identity mismatch"):
+                load_detail_url_overrides(path)
 
 
 if __name__ == "__main__":

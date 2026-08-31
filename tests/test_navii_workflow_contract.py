@@ -102,6 +102,16 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertIn("fail-on-parse-error-rate", self.collector)
         self.assertNotIn("if not section_summaries:", self.collector)
 
+    def test_navii_collector_has_exception_map_and_unresolved_policy(self) -> None:
+        self.assertIn("detail_url_overrides.json", self.collector)
+        self.assertIn("load_detail_url_overrides", self.collector)
+        self.assertIn("search_navii_exact", self.collector)
+        self.assertIn("NaviiDetailIdentifierNotFound", self.collector)
+        self.assertIn("--fail-on-unresolved-rate", self.collector)
+        self.assertIn("fail_on_unresolved_rate:", self.workflow)
+        self.assertIn("FAIL_ON_UNRESOLVED_RATE", self.workflow)
+        self.assertIn("proposed-detail-url-overrides.json", self.workflow)
+
     def test_workflow_installs_navii_dependencies_and_runs_quality_gate(self) -> None:
         self.assertIn("Install Navii collector dependencies", self.workflow)
         self.assertIn("python3 -m pip install --disable-pip-version-check lxml", self.workflow)
