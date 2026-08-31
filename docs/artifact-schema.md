@@ -86,6 +86,32 @@ run-{source_id}-{source_snapshot_date}-{run_label}/
 unknown / fallbackが0件、section/table/link/phoneの抽出が各種別で0件でないことを
 意味します。fetch errorは既存の設定閾値で別に判定します。
 
+## Full-run preflight audit
+
+full相当のsingle workflowでは、full shard matrixの前に同じ16シェアmatrixで
+`sample_fraction=0.001`（約0.1%）のpreflightを実行します。preflightのmetricsは
+`quality_gate.py --candidate-mode preflight` で集約し、全シェアが揃っていること、
+4種別のsection/table/link/phone抽出、parse error、unknown/fallback、fetch error rate
+を確認します。passしない場合はfull shard matrixを開始しません。
+
+preflight audit artifactは次の構成です。
+
+```text
+preflight-audit-manifest.json
+metrics/
+  *-run-metrics.json
+  *-coverage-summary.csv.gz
+  quality-status.json
+shards/downloaded/
+  navii-detail-preflight-shard-*/
+checksums/SHA256SUMS
+```
+
+各preflight shardのraw outputは、shard artifact内の
+`encrypted/preflight-raw-shard-*.tar.zst.age` に保存します。preflight auditは監査専用で、
+full runはpreflight artifactをdownloadせず、同じresolved settingsと公式source artifactから
+独立して候補全件を取得します。
+
 ## `fetch-metrics.json`
 
 ```json

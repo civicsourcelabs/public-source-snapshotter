@@ -22,7 +22,7 @@ MHLW monthly collectorとNavii detail collectorは、後続consumerが使う前�
 
 MHLW monthly runでは、schedule / manualともに公式ページで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しい共通snapshotを選び、`source_snapshot_date` とrun labelへ記録します。公開がまだ実行月に追いついていなくても、実行月を日付として仮定しません。後続consumerは選択済み日付をmanifestから引き継ぎます。public repo側の5日runが失敗した場合は8日runで同じ選択規則により再生成します。
 
-Navii detail runでは、公式open data pageで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しいsnapshotを自動選択します。実行月のsnapshotが未公開でも、利用可能な最新snapshotを選び、その日付をmanifestとrun labelへ記録します。選択したsnapshotの必須linkやdetail取得が失敗した場合はfail closedし、選択後に別の古いsnapshotへfallbackしません。run labelも `collector-navii-detail-YYYYMMDD-{canary|scope|full}` として選択日付から生成します。scheduleは毎月5日にreadiness pollとして動きますが、同じsnapshot dateのfull artifactが既に成功していれば後続jobをskipします。
+Navii detail runでは、公式open data pageで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しいsnapshotを自動選択します。実行月のsnapshotが未公開でも、利用可能な最新snapshotを選び、その日付をmanifestとrun labelへ記録します。選択したsnapshotの必須linkやdetail取得が失敗した場合はfail closedし、選択後に別の古いsnapshotへfallbackしません。run labelも `collector-navii-detail-YYYYMMDD-{canary|scope|full}` として選択日付から生成します。full相当のrunでは内部preflightのために `-preflight` suffixも使いますが、preflight成果物はhandoffへ使いません。scheduleは毎月5日にreadiness pollとして動きますが、同じsnapshot dateのfull artifactが既に成功していれば後続jobをskipします。
 
 ## 初回セットアップ
 
@@ -142,7 +142,7 @@ TLS certificate verificationだけが失敗する場合に限り、owner判断�
 
 ## Navii Detail Full Run
 
-manual full runは、schedule失敗時の再生成、manifest更新直後の確認、またはconsumer artifactを固定したい場合に使います。canaryとowner local decrypt確認が済んでいない状態では実行しません。
+manual full runは、schedule失敗時の再生成、manifest更新直後の確認、またはconsumer artifactを固定したい場合に使います。canaryとowner local decrypt確認が済んでいない状態では実行しません。full相当のworkflowでは、full runと同じsource snapshot、4種別、16シェアmatrix、`max_parallel`、workers、request pacing、retry、timeout、page limitを使って、先に各シェアの約0.1%候補をpreflightします。preflightも16並列で実行し、全シェアのmetricsを集約して抽出品質を判定します。passした場合だけ、同じresolved settingsでfull matrixを開始します。preflightの候補・metrics・暗号化raw出力は監査artifactとして残し、full runの入力にはしません。
 
 推奨input:
 
@@ -167,10 +167,15 @@ schedule runの期待値:
 - `Validate inputs` stepで `execute=true`、`artifact_mode=encrypted_full`、`shard_count=16`、`max_pages_per_shard=0` になっている
 - `max_parallel * workers` が32以下で、aggregate concurrency guardを通過している
 - `Validate inputs` stepで公式open data pageから実行時点以前の最新snapshot dateを解決し、`run_label=collector-navii-detail-YYYYMMDD-full` になっている
+- `Preflight shard` がfull runと同じ16シェアmatrix・`max_parallel=16`・`workers=2`・request settingsで動き、候補率がworkflow定数 `0.001`（約0.1%）になっている
+- `Verify and retain preflight audit` が全preflightシェアのmetricsを集約し、4種別のsection/table/link/phone抽出、parse error、unknown/fallback、fetch error rate、シェア欠落を判定する
+- preflightがpassするまでfull matrixは開始されず、`preflight-audit-manifest.json` にsource snapshotとfull runへ渡したresolved settingsが記録される
+- `navii-detail-preflight-audit-<github_run_id>` と各shardのpreflight audit artifactが残り、preflight raw outputは暗号化される
 - `Package handoff artifact` stepで `encrypted/raw-artifacts-shard-*.tar.zst.age` だけがfull artifactとして含まれ、暗号化前の `*.tar.zst` やraw CSV / JSONL / HTMLが残らない
 - `Upload handoff package` のartifact名が `navii-detail-handoff-collector-navii-detail-YYYYMMDD-full-<github_run_id>` になる
 - consumer scheduleの前にrunが `success` で完了している
 - `quality-status.json` の `quality_status` が `pass` である
+- preflightまたはfull shardでparse errorが発生した場合は、そのシェアが候補を全件処理し終わるのを待たずに終了し、matrixの残りのシェアもfail-fastで停止する
 
 schedule失敗時の復旧:
 

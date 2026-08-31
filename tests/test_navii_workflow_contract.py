@@ -56,8 +56,8 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertIn('run_payload.get("head_sha") == current_sha', self.workflow)
         self.assertIn("skip_existing: ${{ steps.plan.outputs.skip_existing }}", self.workflow)
         self.assertEqual(
-            self.workflow.count("if: needs.validate.outputs.skip_existing != 'true'"),
-            3,
+            len(re.findall(r"^\s+if: .*skip_existing != 'true'", self.workflow, flags=re.MULTILINE)),
+            5,
         )
 
     def test_scheduled_run_stays_full_encrypted_snapshot(self) -> None:
@@ -110,6 +110,32 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertIn("aggregate Navii concurrency must be <= 32", self.workflow)
         self.assertIn('"max_parallel": "16"', self.workflow)
         self.assertIn("fail_on_parse_error_rate:", self.workflow)
+        self.assertIn('NAVII_PREFLIGHT_FRACTION: "0.001"', self.workflow)
+        self.assertIn('name: "Preflight shard ${{ matrix.shard_index }}"', self.workflow)
+        self.assertIn('--sample-fraction "$PREFLIGHT_FRACTION"', self.workflow)
+        self.assertIn("--candidate-mode preflight", self.workflow)
+        self.assertIn("navii-detail-preflight-audit-${{ github.run_id }}", self.workflow)
+        self.assertIn('"full_run_consumes_preflight": False', self.workflow)
+        self.assertIn("--fail-fast-on-parse-error", self.workflow)
+        self.assertIn("fail-fast: true", self.workflow)
+        self.assertNotIn('name: "Preflight canary"', self.workflow)
+        preflight_body = re.search(
+            r"\n  preflight:\n(?P<body>.*?)\n  preflight-audit:\n",
+            self.workflow,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(preflight_body)
+        self.assertNotIn("--sample-per-kind 25", preflight_body.group("body"))
+        package_body = re.search(
+            r"\n  package:\n(?P<body>.*)",
+            self.workflow,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(package_body)
+        self.assertIn("pattern: navii-detail-shard-*-${{ github.run_id }}", package_body.group("body"))
+        self.assertNotIn("pattern: navii-detail-preflight-shard-*-${{ github.run_id }}", package_body.group("body"))
+        self.assertIn("concurrent.futures.wait(", self.collector)
+        self.assertNotIn("concurrent.futures.as_completed(", self.collector)
 
 
 if __name__ == "__main__":
