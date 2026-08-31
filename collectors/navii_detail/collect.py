@@ -403,10 +403,10 @@ def classify_text(text: str) -> list[str]:
 
 
 def parse_navii_id(navii_id: str) -> tuple[str, str, str]:
-    digits = re.sub(r"\D", "", navii_id or "")
-    if len(digits) < 4:
+    value = (navii_id or "").strip()
+    if len(value) < 4 or not value[:2].isdigit() or not value[2].isdigit():
         return "", "", ""
-    return digits[:2], digits[2:3], digits[3:]
+    return value[:2], value[2:3], value[3:]
 
 
 def build_detail_url(pref_cd: str, kikan_kbn: str, kikan_cd: str) -> str:
@@ -2027,7 +2027,7 @@ def main() -> int:
             "structure_fingerprints": sorted(kind_fingerprints.get(kind, set())),
             "parse_error_reasons": {
                 key.split(":", 1)[1]: int(value)
-                for key, value in kind_counter.items()
+                for key, value in counter.items()
                 if key.startswith("parse_error_reason:")
             },
         }

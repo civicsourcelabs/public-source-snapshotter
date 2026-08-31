@@ -11,6 +11,7 @@ from collectors.navii_detail.collect import (
     NaviiParseError,
     analyze_detail,
     analyze_detail_result,
+    parse_navii_id,
     retry_delay_seconds,
     validate_detail_response,
 )
@@ -54,6 +55,10 @@ LEGACY_DOM = """
 
 
 class NaviiDetailParserTest(unittest.TestCase):
+    def test_navii_id_parser_preserves_alphanumeric_facility_suffix(self) -> None:
+        self.assertEqual(parse_navii_id("37537X5122198"), ("37", "5", "37X5122198"))
+        self.assertEqual(parse_navii_id("375L370100040"), ("37", "5", "L370100040"))
+
     def test_retry_backoff_is_exponential(self) -> None:
         self.assertEqual(retry_delay_seconds(2, 0), 2)
         self.assertEqual(retry_delay_seconds(2, 1), 4)
