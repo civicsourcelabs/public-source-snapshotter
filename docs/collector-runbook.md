@@ -18,11 +18,11 @@ MHLW monthly collectorとNavii detail collectorは、後続consumerが使う前�
 | workflow | schedule | effective config |
 | --- | --- | --- |
 | `Source Snapshot: MHLW Monthly` | 毎月5日 07:00 JST / 毎月8日 07:00 JST | `execute=true`、`artifact_mode=encrypted_full`、`max_sources=0`、`source_manifest=sources/mhlw_monthly/source-manifest.json` |
-| `Source Snapshot: Navii Detail` | 毎月5日 00:30 JST | `execute=true`、`artifact_mode=encrypted_full`、`candidate_mode=all`、`shard_count=16`、`max_parallel=16`、`workers=2`、`max_pages_per_shard=0`、`artifact_retention_days=14` |
+| `Source Snapshot: Navii Detail` | 毎年6月・12月の5日 00:30 JST | `execute=true`、`artifact_mode=encrypted_full`、`candidate_mode=all`、`shard_count=16`、`max_parallel=16`、`workers=2`、`max_pages_per_shard=0`、`artifact_retention_days=14` |
 
 MHLW monthly runでは、schedule / manualともに公式ページで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しい共通snapshotを選び、`source_snapshot_date` とrun labelへ記録します。公開がまだ実行月に追いついていなくても、実行月を日付として仮定しません。後続consumerは選択済み日付をmanifestから引き継ぎます。public repo側の5日runが失敗した場合は8日runで同じ選択規則により再生成します。
 
-Navii detail runでは、公式open data pageで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しいsnapshotを自動選択します。実行月のsnapshotが未公開でも、利用可能な最新snapshotを選び、その日付をmanifestとrun labelへ記録します。選択したsnapshotの必須linkやdetail取得が失敗した場合はfail closedし、選択後に別の古いsnapshotへfallbackしません。run labelも `collector-navii-detail-YYYYMMDD-{canary|scope|full}` として選択日付から生成します。full相当のrunでは内部preflightのために `-preflight` suffixも使いますが、preflight成果物はhandoffへ使いません。scheduleは毎月5日にreadiness pollとして動きますが、同じsnapshot dateのfull artifactが既に成功していれば後続jobをskipします。公式IDが現行Navii detail IDと一致しない個別例外は `collectors/navii_detail/detail_url_overrides.json` で先に解決します。既知mapにない `E-0109` は、都道府県・種別・施設名・所在地の厳密検索で一意に解決できた場合だけそのURLを使い、解決できない場合は公式行を残してNavii専用列を空欄にします。未解決率が1.0%を超えた場合、または正常detailページのDOM/抽出が壊れた場合はhandoffを止めます。
+Navii detail runでは、公式open data pageで確認できるsnapshotのうち、Asia/Tokyoの実行時点以前で最も新しいsnapshotを自動選択します。実行月のsnapshotが未公開でも、利用可能な最新snapshotを選び、その日付をmanifestとrun labelへ記録します。選択したsnapshotの必須linkやdetail取得が失敗した場合はfail closedし、選択後に別の古いsnapshotへfallbackしません。run labelも `collector-navii-detail-YYYYMMDD-{canary|scope|full}` として選択日付から生成します。full相当のrunでは内部preflightのために `-preflight` suffixも使いますが、preflight成果物はhandoffへ使いません。scheduleは毎年6月・12月の5日にreadiness pollとして動き、同じsnapshot dateのfull artifactが既に成功していれば後続jobをskipします。公式IDが現行Navii detail IDと一致しない個別例外は `collectors/navii_detail/detail_url_overrides.json` で先に解決します。既知mapにない `E-0109` は、都道府県・種別・施設名・所在地の厳密検索で一意に解決できた場合だけそのURLを使い、解決できない場合は公式行を残してNavii専用列を空欄にします。未解決率が1.0%を超えた場合、または正常detailページのDOM/抽出が壊れた場合はhandoffを止めます。
 
 ## 初回セットアップ
 

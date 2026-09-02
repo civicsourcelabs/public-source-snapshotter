@@ -2,8 +2,8 @@ name: "Source Snapshot: Navii Detail"
 
 on:
   schedule:
-    # Monthly readiness poll at 00:30 JST on the 5th.
-    - cron: "30 15 4 * *"
+    # Semiannual readiness poll at 00:30 JST on June and December 5th.
+    - cron: "30 15 4 6,12 *"
   workflow_dispatch:
     inputs:
       execute:
