@@ -32,8 +32,9 @@ class NaviiWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("inputs.source_snapshot_date", self.workflow)
         self.assertNotIn("inputs.run_label", self.workflow)
 
-    def test_schedule_is_monthly_on_the_fifth_jst(self) -> None:
-        self.assertIn('cron: "30 15 4 * *"', self.workflow)
+    def test_schedule_is_semiannual_on_the_fifth_jst(self) -> None:
+        self.assertIn('cron: "30 15 4 6,12 *"', self.workflow)
+        self.assertNotIn('cron: "30 15 4 * *"', self.workflow)
         self.assertNotIn("4,7,10,13,16,19,22,25,28 6,12", self.workflow)
         self.assertNotIn("3,10,17,24,31 1,7", self.workflow)
 
