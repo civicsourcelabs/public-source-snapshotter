@@ -11,13 +11,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GATEWAY = "NO_OPENAI_TRANSPORT_ALLOWED"
 EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".sh", ".bash", ".yml", ".yaml", ".toml"}
 MODEL_PATTERN = re.compile(r"\b(?:gpt-[a-zA-Z0-9.-]+|o[134](?:-mini|-pro)?|chatgpt-[a-zA-Z0-9.-]+|text-embedding-[a-zA-Z0-9.-]+|dall-e-[0-9]+|whisper-[0-9]+)\b")
-SDK_IMPORT = re.compile(r"""(?:from\s+['"]openai['"]|(?:import|require)\s*\(\s*['"]openai['"]|^\s*(?:from\s+openai\s+import|import\s+openai\b)|new\s+OpenAI\s*\()""", re.M)
+SDK_IMPORT = re.compile(r"""(?:from\s+['"]openai(?:/[^'"]*)?['"]|(?:import|require)\s*\(\s*['"]openai(?:/[^'"]*)?['"]|^\s*(?:from\s+openai(?:\.[\w.]+)?\s+import|import\s+openai\b)|new\s+OpenAI\s*\()""", re.M)
 HTTP = re.compile(r"(?:api\.openai\.com|(?:openai|oai)\.azure\.com|azure\.com/openai)", re.I)
 DIRECT = re.compile(r"\.(?:responses|completions|embeddings|images|audio|batches)\s*\.\s*(?:create|parse|generate|edit)\s*\(")
 def violations(path, source, gateway=GATEWAY):
     errors = []
     # Type-only contracts and schema helpers are not transport.
     runtime = re.sub(r"import\s+type\b[^;]*;", "", source, flags=re.S)
+    runtime = re.sub(r"""import\s+[^;]*?from\s+['"]openai/helpers/zod['"];?""", "", runtime)
+    runtime = re.sub(r"""\[\s*['"](responses|completions|embeddings|images|audio|batches|create|parse|generate|edit)['"]\s*\]""", r".\1", runtime)
     if path != gateway and (SDK_IMPORT.search(runtime) or HTTP.search(runtime) or DIRECT.search(runtime)):
         errors.append("direct OpenAI transport outside the authorized gateway")
     for match in MODEL_PATTERN.finditer(source):
@@ -30,6 +32,9 @@ def self_test():
     bad = [
         'import X from "openai"; new X({});',
         'const x = require("openai");',
+        'import { OpenAI as Client } from "openai/client";',
+        'const client = await import("openai/index.mjs");',
+        'client["responses"]["create"]({});',
         'fetch("https://api.openai.com/v1/responses");',
         'client.responses.create({ model: "gpt-6-astra" });',
         'const model = "gpt-5.6-sol";',
