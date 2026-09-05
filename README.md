@@ -95,3 +95,9 @@ public-source-snapshotter/
 - `collectors/mhlw_monthly/README.md`
 - `sources/navii/source-manifest.json`
 - `sources/mhlw_monthly/source-manifest.json`
+
+## Model and cost policy
+
+The root model remains the user's choice. Subagents use GPT-5.6 Luna only.
+Run `python3 scripts/verify_openai_policy.py` for offline policy verification.
+See [configuration, enforcement limits and Owner setup](docs/openai-cost-safety.md).
