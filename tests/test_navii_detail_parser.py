@@ -298,7 +298,7 @@ class NaviiDetailParserTest(unittest.TestCase):
             return_value=missing_response,
         ), patch(
             "collectors.navii_detail.collect.search_navii_exact",
-            side_effect=NaviiSearchError("Navii exact search did not return one matching facility: count=0"),
+            side_effect=NaviiSearchError("Navii exact search did not return one exact facility result: count=0"),
         ):
             result = process_candidate(index=1, candidate=candidate, args=args)
 

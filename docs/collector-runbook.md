@@ -4,6 +4,10 @@
 
 このrunbookはpublic collector側だけを扱います。downstream candidate出力、consumer inventory、policy反映、datastore loadは扱いません。
 
+## 実行契約
+
+[AGENTS.md](../AGENTS.md)が承認・報告の正本です。通常canary・再生成・handoffはhighとして自律実行し、critical待ちでも独立作業を継続します。owner local decryptは秘密値をAgentに渡す意味ではなく、認可済み隔離consumerから復号・checksum結果を確認する境界です。既存のconfirm入力文字列は現行workflowの技術的入力であり、それ自体をOwner承認の証拠にしません。
+
 ## Supported collectors
 
 | collector | workflow | role |
@@ -105,7 +109,7 @@ collector実装追加とcanary成功は別です。canary結果を確認する�
 - `quality-status.json` の `quality_status` が `pass` である
 - canaryでは4種別各25件以上が対象で、種別別のsection/table/link/phone抽出が0件でない
 
-TLS certificate verificationだけが失敗する場合に限り、owner判断で `insecure_skip_tls_verify=true` を使います。通常runでは `false` のままにします。
+TLS certificate verificationだけが失敗する場合に限り、検証境界の例外として対象・理由・代替策を提示し、Owner承認後に `insecure_skip_tls_verify=true` を使います。通常runでは `false` のままにします。
 
 ## Navii Smoke: encrypted full around 100 pages
 
@@ -212,7 +216,7 @@ MHLW monthlyは、まずcanary manifestの一部だけでdry-runします。
 - summary_onlyでraw ZIP/XLSXがuploadされていない
 
 MHLW monthlyでraw source fileを取得する場合は、`execute=true`、`confirm=owner-approved-public-source-snapshot`、`artifact_mode=encrypted_full` にします。
-厚労省側のTLS chain問題でsummary canaryが証明書検証のみ失敗する場合だけ、owner判断で `insecure_skip_tls_verify=true` を使います。
+厚労省側のTLS chain問題でsummary canaryが証明書検証のみ失敗する場合だけ、検証境界の例外として対象・理由・代替策を提示し、Owner承認後に `insecure_skip_tls_verify=true` を使います。
 
 ## MHLW Monthly Full Run
 

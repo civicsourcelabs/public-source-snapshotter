@@ -1221,7 +1221,7 @@ def search_navii_exact(
     ]
     if len(exact_matches) != 1:
         raise NaviiSearchError(
-            "Navii exact search did not return one matching facility: "
+            "Navii exact search did not return one exact facility result: "
             f"count={len(exact_matches)}"
         )
     return exact_matches[0]
@@ -1525,7 +1525,7 @@ def parse_error_reason(error: str) -> str:
 
 
 def unresolved_reason(error: str) -> str:
-    if "did not return one matching facility" in error:
+    if "did not return one exact facility result" in error:
         return "exact_search_no_unique_match"
     if "requires facility name and address" in error:
         return "exact_search_missing_match_fields"
