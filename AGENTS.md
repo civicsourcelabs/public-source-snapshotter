@@ -32,3 +32,13 @@ critical待ちで止めるのは当該操作と真の依存工程だけ。独立
 - remote mainから隔離worktree、既存PRは対象headで進め、他者の変更を保持する。必要な関連修正を追跡し、対象外へ広げない。並行可否はwriter・入力世代・依存・予算で決める。
 - 推論・test・実装方法・許可された委譲は成果に合わせる。通常手順改善はlow/high。本ファイルの全変更をcriticalとせず、critical境界の変更だけ事前承認する。
 - Owner停止は予約操作・委譲先へ伝播する。既発生effectを確認し、契約改定だけで未実装の権限/運用機能を有効化したと報告しない。
+
+## Model and API Cost Safety
+
+- 親CodexはUserが選んだモデルを使う。すべての子・孫・再開された委譲先は `gpt-5.6-luna` のみ。明示spawnもLunaを指定し、親の非Lunaモデルを継承するforkは使用しない。
+- Astra / Sol / Terra / Pro / その他のモデルへの委譲・昇格は禁止。高度な推論は親で行い、モデルを切り替えず独立作業を続ける。
+- applicationのOpenAI APIは `gpt-5.6-luna` のみ。Research・Authoring・QA・Repair・Evaluation・metadata・retryを含め例外なし。許可リスト、検査、実行上限を明示User指示なしに緩和しない。
+- 有料大量実行は対象件数・呼出上限・並列数を示した明示opt-inなしに開始しない。通常の実装確認はmock / stub / fixture / deterministic testを使用し、live batch/E2Eは禁止。1 request smokeも明示的に依頼された場合だけ。
+- API key・prompt全文・個人情報をcommit/ログへ出さない。既存keyの失効・削除・自動切替は行わない。Project Model UsageのLuna-only設定と専用key切替はOwner作業。
+- `.codex/config.toml` と `.codex/agents/{default,worker,explorer}.toml` は予防設定であり、改変不能なallowlistではない。提供元側のhard lockを設定済みと推定しない。
+- 変更後は `python3 scripts/verify_openai_policy.py` を実行する。live APIや子エージェントを起動する検証ではない。
