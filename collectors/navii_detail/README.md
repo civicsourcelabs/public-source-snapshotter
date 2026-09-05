@@ -2,7 +2,7 @@
 
 public repo側で実装するcollectorのCLI contractです。
 
-`collect.py` は公式open data ZIPからdetail URL候補を作り、owner承認時だけdetail HTMLを取得するpublic-source collectorです。external datastore、external-service secret、deploy provider、production secretには接続しません。
+`collect.py` は公式open data ZIPからdetail URL候補を作り、認可済みの取得範囲・予算・品質条件内でdetail HTMLを取得するpublic-source collectorです。通常取得は[AGENTS.md](../../AGENTS.md)のhighとして自律実行し、criticalな操作だけ事前承認します。external datastore、external-service secret、deploy provider、production secretには接続しません。
 
 ## CLI
 

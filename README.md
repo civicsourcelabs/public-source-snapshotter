@@ -4,6 +4,10 @@
 
 このrepoはpublicです。secret、非公開処理用candidate、非公開処理結果、load script、復号private keyは置きません。
 
+## Agent契約
+
+行動分類・承認・継続義務は[AGENTS.md](AGENTS.md)を参照します。通常の取得・公開変更は検証後に自律実行して事後報告し、criticalだけ事前承認します。承認待ちでも独立low/highは完遂します。
+
 ## 目的
 
 public collector repoは、公開sourceから取得し、後段のprivate consumerへ渡せるartifactを作るだけを担当します。
@@ -63,7 +67,7 @@ public-source-snapshotter/
 
 ## 実行の流れ
 
-1. `source-manifest.json` の公式URLと、実行時点以前の最新snapshotが解決できることをownerが確認する
+1. `source-manifest.json` の公式URLと、実行時点以前の最新snapshotが解決できることをAgentが確認する
 2. `summary_only` canaryを実行する
 3. `keys/owner-age-recipient.example.txt` を実際のage public recipient `keys/owner-age-recipient.txt` へ置き換える
 4. `encrypted_full` canaryを実行し、owner localでdecrypt / checksum確認する
@@ -72,7 +76,7 @@ public-source-snapshotter/
 
 ## 安全境界
 
-- collectorはmanual canaryから始め、owner確認済みのものだけschedule化する
+- collectorはmanual canaryから始め、品質・暗号化・consumer受領を検証したものをhighとしてschedule化する。新規契約や権限境界変更を伴う場合はcriticalとして分離する
 - MHLW monthly collectorは、private月次pipeline前にencrypted full artifactを作るscheduleを持つ
 - Navii detail collectorは、private prepare-load scheduleより前にencrypted full artifactを作るscheduleを持つ
 - summary / metricsは平文でよいが、施設単位のfull artifactは暗号化する
